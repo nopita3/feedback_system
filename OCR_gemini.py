@@ -1,52 +1,17 @@
 from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 
-from pydantic import BaseModel , Field
-from typing import Annotated, List, TypedDict
 import fitz  # PyMuPDF
-
-import os
-import operator
 import base64
-import json
-from pathlib import Path    
+import json 
 from time import perf_counter
+from datetime import datetime
+from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()
-api_key = os.getenv('openai_api_key')
-gemini_api_key = os.getenv('gemini_api_key')
-
-
-
-
-# กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
-class OverallState(TypedDict):
-    pdf_path: Path
-    pages: List[str]
-    ocr_results: Annotated[List[dict], operator.add] # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
-    final_compiled_results: List[dict] # เพิ่ม State สำหรับเก็บผลลัพธ์ที่รวมแล้ว
-
-# State ย่อยสำหรับการทำ Map-Reduce (ส่งข้อมูลหน้าเดี่ยวไปในแต่ละ Node)
-class PageState(TypedDict):
-    page_b64: str
-    page_num: int
-
-class OCRResult(BaseModel):
-    question_id: str = Field( description="เลขข้อ")
-    question_content: str = Field( description="เนื้อหาโจทย์ (ไม่เอาตัวเลือก)")
-    skill_tags: List[str] = Field( description="ทักษะที่เกี่ยวข้อง เช่น การวิเคราะห์ระบบ, การคำนวณสูตร")
-    error_type: str = Field( description="จุดผิดพลาดที่ผู้เรียนมักจะทำผิด หรือเว้นขีด - ไว้")
-    image_description: str = Field( description="คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง")
-
-# เพิ่ม Schema แบบ List สำหรับ Agent ที่ทำหน้าที่รวมคำตอบ
-class OCRResultList(BaseModel):
-    items: List[OCRResult] = Field(description="รายการรวมโจทย์ข้อสอบทั้งหมดจากทุกหน้า")
+from Schemes.schema import OverallState, PageState, OCRResultList
+from config import  get_gemini_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
@@ -90,12 +55,13 @@ def process_ocr_page(state: PageState):
         dict: Contains ocr_results with the OCR processing output for the page
     """
 
-    callback_gemini1 = UsageMetadataCallbackHandler()
+
 
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
     
-    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0,  api_key=gemini_api_key, callbacks=[callback_gemini1])
+    llm , callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
+    
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
         "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ "
@@ -133,14 +99,30 @@ def process_ocr_page(state: PageState):
         "page_num": page_num,
         "content": content_text
     }
+
+    token_meatadata = {str(datetime.now()): callback.usage_metadata}
+    with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+        try:
+            log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
+        except Exception as e:
+            print(f"Token log write error: {e}")
     
     
-    print(f"Total Gemini 1 Tokens Used: {callback_gemini1.usage_metadata}\n")
+    
 
     return {"ocr_results": [result_data]}
 
 # Node: Agent รวมคำตอบทั้งหมดให้อยู่ใน List เดียวกัน โดยประมวลผลแต่ละหน้า
 def aggregate_results(state: OverallState):
+
+    with open("output_OCR_Gemini_results.txt", "w", encoding="utf-8") as f:
+        # ดึงมา sort ให้สวยงามก่อนเขียนลงไฟล์
+        sorted_results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
+        for result in sorted_results:
+            page = result["page_num"]
+            content = result["content"]
+            f.write(f"--- Page {page} ---\n{content}\n")
+
     print("aggregate_results is running...")
     """
     Aggregate and consolidate OCR results from all processed pages.
@@ -155,9 +137,9 @@ def aggregate_results(state: OverallState):
     Returns:
         dict: Contains final_compiled_results as a consolidated list of OCR data
     """
-    callback_gemini2 = UsageMetadataCallbackHandler()
+    
     # เปลี่ยนกลับเป็นโมเดลที่เสถียรกับการทำ Structured Output
-    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0,  api_key=gemini_api_key, callbacks=[callback_gemini2])
+    llm , callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
     structured_model = llm.with_structured_output(schema=OCRResultList, method="json_schema")
 
     results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
@@ -187,6 +169,13 @@ def aggregate_results(state: OverallState):
         
         try:
             response = structured_model.invoke([HumanMessage(content=prompt)])
+
+            token_meatadata = {str(datetime.now()): callback.usage_metadata}
+            with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+                try:
+                    log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
+                except Exception as e:
+                    print(f"Token log write error: {e}")
             
             # เนื่องจากใช้ schema=OCRResultList เข้าไปตรงๆ response จะตีกลับมาเป็น Pydantic object
             # เราสามารถเรียกใช้ .items หรือแปลงเป็น dict ได้เลย
@@ -200,9 +189,11 @@ def aggregate_results(state: OverallState):
             compiled.extend(data)
                 
         except Exception as e:
-            print(f"Error processing page result: {e}")
+            print(f"Error processing page result: {e}") 
             continue
-    print(f"Total Gemini 2 Tokens Used: {callback_gemini2.usage_metadata}\n")
+
+    
+
     return {"final_compiled_results": compiled}
 
 # ประกอบ Graph นำ Components ทั้งหมดมาร้อยเรียงกัน
@@ -237,16 +228,10 @@ if __name__ == "__main__":
         config={"max_concurrency": 2} # ลดเหลือ 2 เพื่อป้องกัน 429 RESOURCE_EXHAUSTED จาก Gemini Free Tier
     )
     # บันทึก raw OCR results ลงไฟล์ (แต่ละหน้าต่อหนึ่งบรรทัด)
-    with open("OCR_results.txt", "w", encoding="utf-8") as f:
-        # ดึงมา sort ให้สวยงามก่อนเขียนลงไฟล์
-        sorted_results = sorted(final_state.get("ocr_results", []), key=lambda x: x["page_num"])
-        for result in sorted_results:
-            page = result["page_num"]
-            content = result["content"]
-            f.write(f"--- Page {page} ---\n{content}\n")
+    
 
             
-    with open("Aggregate_results.json", "w", encoding="utf-8") as f:
+    with open("output_Aggregate_GeminiAPI_results.json", "w", encoding="utf-8") as f:
         # บันทึกข้อมูลที่ผ่านการรวมแล้วจาก Agent ลงไฟล์ JSON 
         json.dump(final_state.get("final_compiled_results", []), f, ensure_ascii=False, indent=2)
         

@@ -1,53 +1,24 @@
+from datetime import datetime
+
 from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
 
-from langchain_core.callbacks import UsageMetadataCallbackHandler
+from config import get_ollama_model
 
-from pydantic import BaseModel , Field
-from typing import Annotated, List, TypedDict
 import fitz  # PyMuPDF
-
-import os
-import operator
 import base64
 import json
 from pathlib import Path    
 from time import perf_counter
 
-from dotenv import load_dotenv
-
-load_dotenv()
-api_key = os.getenv('openai_api_key')
-gemini_api_key = os.getenv('gemini_api_key')
+from Schemes.schema import OverallState, PageState
+import re
+from fcntl import flock, LOCK_EX, LOCK_UN
 
 
 
-callback_ollama2 = UsageMetadataCallbackHandler()
 
-# กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
-class OverallState(TypedDict):
-    pdf_path: Path
-    pages: List[str]
-    ocr_results: Annotated[List[dict], operator.add] # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
-    final_compiled_results: List[dict] # เพิ่ม State สำหรับเก็บผลลัพธ์ที่รวมแล้ว
-
-# State ย่อยสำหรับการทำ Map-Reduce (ส่งข้อมูลหน้าเดี่ยวไปในแต่ละ Node)
-class PageState(TypedDict):
-    page_b64: str
-    page_num: int
-
-class OCRResult(BaseModel):
-    question_id: str = Field( description="เลขข้อ")
-    question_content: str = Field( description="เนื้อหาโจทย์ (ไม่เอาตัวเลือก)")
-    skill_tags: List[str] = Field( description="ทักษะที่เกี่ยวข้อง เช่น การวิเคราะห์ระบบ, การคำนวณสูตร")
-    error_type: str = Field( description="จุดผิดพลาดที่ผู้เรียนมักจะทำผิด หรือเว้นขีด - ไว้")
-    image_description: str = Field( description="คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง")
-
-# เพิ่ม Schema แบบ List สำหรับ Agent ที่ทำหน้าที่รวมคำตอบ
-class OCRResultList(BaseModel):
-    items: List[OCRResult] = Field(description="รายการรวมโจทย์ข้อสอบทั้งหมดจากทุกหน้า")
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
@@ -90,13 +61,13 @@ def process_ocr_page(state: PageState):
     Returns:
         dict: Contains ocr_results with the OCR processing output for the page
     """
-    callback_ollama1 = UsageMetadataCallbackHandler()
+    
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
     
     # ระบุ format="json" เพื่อบังคับให้วิเคราะห์ผลออกมาเป็น JSON
-    llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json", callbacks=[callback_ollama1])
-    # llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0,  api_key=gemini_api_key, callbacks=[callback_gemini1])
+    llm , callback  = get_ollama_model(model="qwen3.5:cloud")
+    
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
         "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ "
@@ -139,8 +110,16 @@ def process_ocr_page(state: PageState):
             "page_num": page_num,
             "content": "[]"
         }
-        
-    print(f"Total Ollama 1 (OCR) Tokens Used: {callback_ollama1.usage_metadata}\n")
+
+    token_meatadata = {str(datetime.now()): callback.usage_metadata}
+    try:
+        s = json.dumps(token_meatadata, ensure_ascii=False, default=str)
+        with open("Token_OllamaCloud_usage_log.txt", "a", encoding="utf-8") as log_file:
+            flock(log_file.fileno(), LOCK_EX)
+            log_file.write(s + "\n")
+            flock(log_file.fileno(), LOCK_UN)
+    except Exception as e:
+        print(f"Token log write error: {e}")
     return {"ocr_results": [result_data]}
 
 
@@ -150,7 +129,7 @@ def process_ocr_page(state: PageState):
 def aggregate_results(state: OverallState):
     print("aggregate_results is running...")
     
-    with open("OCR_results.txt", "w", encoding="utf-8") as f:
+    with open("output_OCR_OllamaCloud_results.txt", "w", encoding="utf-8") as f:
         for result in state.get("ocr_results", []):
             f.write(f"--- Page {result['page_num']} ---\n{result['content']}\n")
 
@@ -167,7 +146,7 @@ def aggregate_results(state: OverallState):
     Returns:
         dict: Contains final_compiled_results as a consolidated list of OCR data
     """
-    llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json", callbacks=[callback_ollama2])
+    llm , callback  = get_ollama_model(model="scb10x/llama3.2-typhoon2-3b-instruct:latest")
     
     results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
     
@@ -197,7 +176,17 @@ def aggregate_results(state: OverallState):
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             content_text = response.content if hasattr(response, 'content') else str(response)
-            
+
+            token_meatadata = {str(datetime.now()): callback.usage_metadata}
+            try:
+                s = json.dumps(token_meatadata, ensure_ascii=False, default=str)
+                with open("Token_Typhoon_ollama_usage_log.txt", "a", encoding="utf-8") as log_file:
+                    flock(log_file.fileno(), LOCK_EX)
+                    log_file.write(s + "\n")
+                    flock(log_file.fileno(), LOCK_UN)
+            except Exception as e:
+                print(f"Token log write error: {e}")
+
             # ลบ markdown formatting เผื่อ llm พ่น ```json มา
             if "```json" in content_text:
                 content_text = content_text.split("```json")[-1].split("```")[0].strip()
@@ -205,17 +194,8 @@ def aggregate_results(state: OverallState):
                 # เผื่อโมเดลพ่นแค่ ``` ครอบเฉยๆ แยกแค่ ```
                 content_text = content_text.split("```")[1].strip()
 
-            # แก้ปัญหา Invalid \escape จาก LaTeX format ที่พ่น \ มาโดยไม่ escape เช่น \circ หรือ \n
-            # แทนที่จะเจอ \c แล้วพัง เราต้อง escape \ ให้เป็น \\ เพื่อให้ json.loads มองเป็น literal backslash ใน json string
-            # แต่ข้อความพวก \n หรือ \t เรายังต้องการเก็บความหมายของ newline/tab ไว้อยู่
-            
-            # ชดเชยกรณี \ ธรรมดาที่ไม่ได้ตามด้วยตัวอักษรพิเศษของ json
-            # วิธีที่ง่ายที่สุดสำหรับเคส LaTeX ภายใน JSON string คือการหาและแทนที่ backslash เดี่ยวๆ 
-            # ที่ไม่ใช่เริ่ม \n, \t, \r, \", \\ ด้วย double backslash
-            # ใช้ raw string replace สำหรับคำยอดฮิตใน LaTeX
-            content_text = content_text.replace(r"\circ", r"\\circ")
-            content_text = content_text.replace(r"\n", r"\\n") # ใน string แบบ JSON อยากให้เป็นแค่ text ก็ต้อง escape
-            content_text = content_text.replace(r"\\n", r"\\n") # เผื่อมันมาเป็น \\n อยู่แล้ว
+            # Replace any backslash not followed by a valid JSON escape char: " \\ / b f n r t u
+            content_text = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', content_text)
 
             try:
                 # ลองซ่อม string ก่อน parse ถ้ารูปแบบคล้าย Object เดี่ยว แต่เราบังคับ Array
@@ -240,7 +220,7 @@ def aggregate_results(state: OverallState):
         except Exception as e:
             print(f"Error processing page result: {e}")
             continue
-    print(f"Total Ollama 2 Tokens Used: {callback_ollama2.usage_metadata}\n")
+    
         
     return {"final_compiled_results": compiled}
 
@@ -270,7 +250,7 @@ if __name__ == "__main__":
     pdf_file_path = Path("Documents/final_M5_022568.pdf")
     
     # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
-    strat = perf_counter()
+    start = perf_counter()
     final_state = graph.invoke(
         {"pdf_path": pdf_file_path, "ocr_results": [], "final_compiled_results": []},
         config={"max_concurrency": 2} # ลดเหลือ 2 เพื่อป้องกัน 429 RESOURCE_EXHAUSTED จาก Gemini Free Tier
@@ -278,12 +258,11 @@ if __name__ == "__main__":
     # บันทึก raw OCR results ลงไฟล์ (แต่ละหน้าต่อหนึ่งบรรทัด)
     
 
-    with open("Aggregate_results.json", "w", encoding="utf-8") as f:
+    with open("output_Aggregate_Typhoon_results.json", "w", encoding="utf-8") as f:
         # บันทึกข้อมูลที่ผ่านการรวมแล้วจาก Agent ลงไฟล์ JSON 
         json.dump(final_state.get("final_compiled_results", []), f, ensure_ascii=False, indent=2)
         
     end = perf_counter()
-    print(f"Total processing time: {end - strat:.2f} seconds")
-    
-    print(f"Total Ollama 2 (Aggregate) Tokens Used: {callback_ollama2.usage_metadata}\n")
+    print(f"Total processing time: {end - start:.2f} seconds")
+
     
