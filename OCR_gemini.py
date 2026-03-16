@@ -1,21 +1,35 @@
-import operator
-import base64
-import fitz  # PyMuPDF
-from typing import Annotated, List, TypedDict
 from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
+
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+
+from pydantic import BaseModel , Field
+from typing import Annotated, List, TypedDict
+import fitz  # PyMuPDF
+
+import os
+import operator
+import base64
+import json
 from pathlib import Path    
 from time import perf_counter
-from pydantic import BaseModel , Field
-import json
+
+from dotenv import load_dotenv
+
+load_dotenv()
+api_key = os.getenv('openai_api_key')
+gemini_api_key = os.getenv('gemini_api_key')
+
+
+
 
 # กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
 class OverallState(TypedDict):
     pdf_path: Path
     pages: List[str]
-    ocr_results: Annotated[List[str], operator.add] # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
+    ocr_results: Annotated[List[dict], operator.add] # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
     final_compiled_results: List[dict] # เพิ่ม State สำหรับเก็บผลลัพธ์ที่รวมแล้ว
 
 # State ย่อยสำหรับการทำ Map-Reduce (ส่งข้อมูลหน้าเดี่ยวไปในแต่ละ Node)
@@ -61,6 +75,7 @@ def continue_to_ocr(state: OverallState):
 
 # Node: ประมวลผลแต่ละหน้าแบบ Parallel โดยรับ State แบบเดี่ยว (PageState)
 def process_ocr_page(state: PageState):
+    print("process_ocr_page is running...")
     """
     Process individual PDF pages in parallel using OCR.
     
@@ -75,12 +90,12 @@ def process_ocr_page(state: PageState):
         dict: Contains ocr_results with the OCR processing output for the page
     """
 
+    callback_gemini1 = UsageMetadataCallbackHandler()
+
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
     
-    # ระบุ format="json" เพื่อบังคับให้วิเคราะห์ผลออกมาเป็น JSON
-    llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json")
-    
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0,  api_key=gemini_api_key, callbacks=[callback_gemini1])
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
         "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ "
@@ -97,7 +112,7 @@ def process_ocr_page(state: PageState):
         "  }\n"
         "]\n"
         "ห้ามเกริ่นนำใดๆ ตอบเป็น JSON Array เท่านั้น\n"
-        "ถ้าหน้านั้นไม่ใช่ข้อสอบแบบตัวเลือก ให้ข้ามไปเลยไม่ค้องส่งคำตอบของข้อมูลเหล่านั้นมาสิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบแบบเลือกตอบเท่านั้น\n "
+        "ถ้าหน้านั้นไม่ใช่ข้อสอบ ให้ข้ามไปเลยไม่ต้องส่งคำตอบของข้อมูลเหล่านั้นมาสิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบ\n "
     )
     
     # ส่ง Message แบบระบุ base64 ใน image_url
@@ -110,18 +125,29 @@ def process_ocr_page(state: PageState):
     
     response = llm.invoke([message])
     
-    formatted_result = f"--- Page {page_num} ---\n, {response.content}"
-    
-    return {"ocr_results": [formatted_result]}
+    # เมื่อใช้ Gemini แบบปกติ ค่าที่ได้จะเป็น AIMessage ที่มี content แต่ตอนนี้มันมี metadata ปนมาด้วย
+    # เราจึงสกัดเฉพาะส่วนที่เป็น .content (ซึ่งเป็น text JSON) ออกมาก่อน 
+    content_text = response.content if hasattr(response, 'content') else str(response)
 
-# Node: Agent รวมคำตอบทั้งหมดให้อยู่ใน List เดียวกัน โดยใช้ Structured Output
+    result_data = {
+        "page_num": page_num,
+        "content": content_text
+    }
+    
+    
+    print(f"Total Gemini 1 Tokens Used: {callback_gemini1.usage_metadata}\n")
+
+    return {"ocr_results": [result_data]}
+
+# Node: Agent รวมคำตอบทั้งหมดให้อยู่ใน List เดียวกัน โดยประมวลผลแต่ละหน้า
 def aggregate_results(state: OverallState):
+    print("aggregate_results is running...")
     """
     Aggregate and consolidate OCR results from all processed pages.
     
-    This node collects all OCR outputs from parallel page processing and uses
-    an LLM to combine them into a single structured JSON format. It handles
-    sorting of results to ensure consistent ordering despite parallel execution.
+    This node processes each page individually through an LLM and combines
+    all results into a single structured list. It processes page-by-page
+    and extends the compiled results with each page's output.
     
     Args:
         state (OverallState): Contains ocr_results list from all processed pages
@@ -129,64 +155,54 @@ def aggregate_results(state: OverallState):
     Returns:
         dict: Contains final_compiled_results as a consolidated list of OCR data
     """
-    
-    # ใช้ qwen3.5:cloud ที่ support JSON format ได้ดีกว่า
-    # สำหรับ structured output กับ List type อาจมีปัญหา ดังนั้นจึงใช้ manual JSON parsing แทน
-    llm = ChatOllama(model="scb10x/llama3.2-typhoon2-3b-instruct", temperature=0, format="json")
-    
-    # นำผลลัพธ์จากแต่ละหน้ามารวมกันเป็น Text เดียว
-    # เรียงลำดับ string ใหม่ตาม page เพราะการทำงานแบบ Parallel ผลลัพธ์อาจจะดีดกลับมาเรียงไม่ถูกลำดับ
-    results = sorted(state.get("ocr_results", [])) 
-    combined_text = "\n".join(results)
-    
-    prompt = (
-        "คุณคือผู้ช่วยรวบรวมข้อมูล OCR จากทุกหน้า PDF\n"
-        "หน้าที่ของคุณ: นำผลลัพธ์ JSON ของแต่ละหน้า มารวบรวมและจัดรูปแบบให้เป็น Single JSON Object\n\n"
-        "**เงื่อนไขสำคัญ:**\n"
-        "1. ต้องตอบกลับเป็น JSON Object โครงสร้างเดียวเท่านั้น ตามตัวอย่างนี้:\n\n"
-        "{\n"
-        '  "items": [\n'
-        "    {\n"
-        '      "question_id": "1",\n'
-        '      "question_content": "เนื้อหาข้อ 1",\n'
-        '      "skill_tags": ["ทักษะ 1", "ทักษะ 2"],\n'
-        '      "error_type": "ข้อผิดพลาดที่พบบ่อย",\n'
-        '      "image_description": "คำอธิบายรูปภาพ หรือ -"\n'
-        "    },\n"
-        "    {\n"
-        '      "question_id": "2",\n'
-        '      "question_content": "เนื้อหาข้อ 2",\n'
-        '      "skill_tags": ["ทักษะ 3"],\n'
-        '      "error_type": "ข้อผิดพลาด",\n'
-        '      "image_description": "-"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "2. รวมข้อมูลทั้งหมดให้ครบถ้วน ห้ามตัดทอนข้อใดทิ้ง\n"
-        "3. ห้ามเปลี่ยนแปลงข้อมูลแม้แต่ตัวอักษรเดียว\n"
-        "4. เรียงลำดับตามหมายเลขข้อสอบจากน้อยไปมาก\n\n"
-        f"ข้อมูลดิบทั้งหมดจากทุกหน้า:\n{combined_text}"
-    )
-    
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        # ดึง String ที่เป็น JSON มาแปลง (Parse) เอง จะปลอดภัยกับโมเดลมากกว่า
-        data = json.loads(response.content)
+    callback_gemini2 = UsageMetadataCallbackHandler()
+    # เปลี่ยนกลับเป็นโมเดลที่เสถียรกับการทำ Structured Output
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0,  api_key=gemini_api_key, callbacks=[callback_gemini2])
+    structured_model = llm.with_structured_output(schema=OCRResultList, method="json_schema")
 
+    results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
+    
+    compiled = []
+    
+    # ประมวลผลแต่ละหน้าทีละหน้า
+    for result in results:
+        prompt = (
+            "คุณคือผู้ช่วยประมวลผลข้อมูล OCR จากหน้า PDF\n"
+            "หน้าที่ของคุณ: นำผลลัพธ์ JSON จากหน้าหนึ่ง มาจัดรูปแบบให้เป็น JSON Array ของ objects\n\n"
+            "**เงื่อนไขสำคัญ:**\n"
+            "ส่วนไหนเป็นสมการให้ใส่ format LaTeX ได้เลย เช่น $E=mc^2$ \n"
+            "ต้องตอบกลับเป็น JSON Array เท่านั้น ตามตัวอย่างนี้:\n"
+            "[\n"
+            "  {\n"
+            '    "question_id": "1",\n'
+            '    "question_content": "เนื้อหาข้อ 1",\n'
+            '    "skill_tags": ["ทักษะ 1", "ทักษะ 2"],\n'
+            '    "error_type": "ข้อผิดพลาดที่พบบ่อย",\n'
+            '    "image_description": "คำอธิบายรูปภาพ หรือ -"\n'
+            "  }\n"
+            "]\n\n"
+            "ห้ามเพิ่มข้อมูลใดๆ แค่จัดรูปแบบตามโครงสร้างเท่านั้น\n"
+            f"ข้อมูลหน้านี้:\n{result['content']}"
+        )
         
-        
-        # จัดการกรณีที่เผื่อโมเดลแอบดื้อ คืนเป็น List ตรงๆ หรือคืนที่มี dict ครอบ
-        if isinstance(data, list):
-            compiled = data
-        elif isinstance(data, dict) and "items" in data:
-            compiled = data["items"]
-        else:
-            compiled = [data]
+        try:
+            response = structured_model.invoke([HumanMessage(content=prompt)])
             
-    except Exception as e:
-        print(f"Error parsing final results: {e}")
-        compiled = []
-        
+            # เนื่องจากใช้ schema=OCRResultList เข้าไปตรงๆ response จะตีกลับมาเป็น Pydantic object
+            # เราสามารถเรียกใช้ .items หรือแปลงเป็น dict ได้เลย
+            if hasattr(response, 'items'):
+                # แปลง Pydantic ข้อมูลย่อยให้อยู่ในรูป dict เพื่อเอาไป save JSON ได้
+                data = [item.model_dump() for item in response.items]
+            else:
+                data = []
+
+            # รวมผลลัพธ์เข้ากับ compiled
+            compiled.extend(data)
+                
+        except Exception as e:
+            print(f"Error processing page result: {e}")
+            continue
+    print(f"Total Gemini 2 Tokens Used: {callback_gemini2.usage_metadata}\n")
     return {"final_compiled_results": compiled}
 
 # ประกอบ Graph นำ Components ทั้งหมดมาร้อยเรียงกัน
@@ -214,21 +230,28 @@ if __name__ == "__main__":
     # ระบุพาทไปยังไฟล์ PDF ของคุณ
     pdf_file_path = Path("Documents/final_M5_022568.pdf")
     
-    # เริ่มต้นการทำงาน (Invoke) แบบ Parallel
-    strat = perf_counter()
+    # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
+    start = perf_counter()
     final_state = graph.invoke(
         {"pdf_path": pdf_file_path, "ocr_results": [], "final_compiled_results": []},
-        config={"max_concurrency": 6} # เพิ่ม max_concurrency กำจัดจำนวน request พร้อมกันเพื่อแก้ปัญหา 429
+        config={"max_concurrency": 2} # ลดเหลือ 2 เพื่อป้องกัน 429 RESOURCE_EXHAUSTED จาก Gemini Free Tier
     )
     # บันทึก raw OCR results ลงไฟล์ (แต่ละหน้าต่อหนึ่งบรรทัด)
     with open("OCR_results.txt", "w", encoding="utf-8") as f:
-        for result in final_state.get("ocr_results", []):
-            f.write(result + "\n")
+        # ดึงมา sort ให้สวยงามก่อนเขียนลงไฟล์
+        sorted_results = sorted(final_state.get("ocr_results", []), key=lambda x: x["page_num"])
+        for result in sorted_results:
+            page = result["page_num"]
+            content = result["content"]
+            f.write(f"--- Page {page} ---\n{content}\n")
 
+            
     with open("Aggregate_results.json", "w", encoding="utf-8") as f:
         # บันทึกข้อมูลที่ผ่านการรวมแล้วจาก Agent ลงไฟล์ JSON 
         json.dump(final_state.get("final_compiled_results", []), f, ensure_ascii=False, indent=2)
         
     end = perf_counter()
-    print(f"Total processing time: {end - strat:.2f} seconds")
+    print(f"Total processing time: {end - start:.2f} seconds")
+  
+    
     

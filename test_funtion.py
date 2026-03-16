@@ -1,8 +1,12 @@
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 import json
+import os
+from dotenv import load_dotenv
 
-
+load_dotenv()
+api_key = os.getenv("openai_api_key")
 
 
 
@@ -20,7 +24,7 @@ def aggregate_results(page_data):
         list: Extracted question data as list of dicts
     """
     
-    llm = ChatOllama(model="scb10x/llama3.2-typhoon2-3b-instruct:latest", temperature=0, format="json")
+    llm = ChatOpenAI(model="gpt-5-mini", temperature=0, format="json" , api_key=api_key)
     
     prompt = (
         "คุณคือผู้ช่วยแยกวิเคราะห์ JSON ที่ได้จากการทำ OCR\n"
