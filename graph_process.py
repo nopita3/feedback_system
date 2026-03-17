@@ -64,7 +64,7 @@ if __name__ == "__main__":
         final_state = graph.invoke({"pdf_path": pdf_file_path, 
                                     "ocr_results": [], 
                                     "final_compiled_results": []},
-                                    config={"max_concurrency": 4}
+                                    config={"max_concurrency": 3}
                                     )
         
         with open(f"output_Aggregate_{api_model}_results.json", "w", encoding="utf-8") as f:
