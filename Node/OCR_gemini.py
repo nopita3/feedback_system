@@ -1,14 +1,12 @@
 from langchain_core.messages import HumanMessage
-from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
-
 
 import fitz  # PyMuPDF
 import base64
 import json 
-from time import perf_counter
 from datetime import datetime
-from pathlib import Path
+from time import perf_counter
+from fcntl import flock, LOCK_EX, LOCK_UN
 
 from Schemes.schema import OverallState, PageState, OCRResultList
 from config import  get_gemini_model
@@ -55,7 +53,7 @@ def process_ocr_page(state: PageState):
         dict: Contains ocr_results with the OCR processing output for the page
     """
 
-
+    strat_ocr_page = perf_counter()
 
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
@@ -99,13 +97,17 @@ def process_ocr_page(state: PageState):
         "page_num": page_num,
         "content": content_text
     }
+    end_ocr_page = perf_counter()
 
-    token_meatadata = {str(datetime.now()): callback.usage_metadata}
-    with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-        try:
+    token_meatadata = {str(datetime.now()): callback.usage_metadata,
+                        "processing_ocr_each_page_time": (end_ocr_page - strat_ocr_page)}
+    try:
+        with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+            flock(log_file.fileno(), LOCK_EX)
             log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-        except Exception as e:
-            print(f"Token log write error: {e}")
+            flock(log_file.fileno(), LOCK_UN)
+    except Exception as e:
+        print(f"Token log write error: {e}")
     
     
     
@@ -124,6 +126,7 @@ def aggregate_results(state: OverallState):
             f.write(f"--- Page {page} ---\n{content}\n")
 
     print("aggregate_results is running...")
+    
     """
     Aggregate and consolidate OCR results from all processed pages.
     
@@ -168,14 +171,16 @@ def aggregate_results(state: OverallState):
         )
         
         try:
+            strat_ocr_page = perf_counter()
             response = structured_model.invoke([HumanMessage(content=prompt)])
-
-            token_meatadata = {str(datetime.now()): callback.usage_metadata}
-            with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-                try:
+            
+            try:
+                with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+                    flock(log_file.fileno(), LOCK_EX)
                     log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-                except Exception as e:
-                    print(f"Token log write error: {e}")
+                    flock(log_file.fileno(), LOCK_UN)
+            except Exception as e:
+                print(f"Token log write error: {e}")
             
             # เนื่องจากใช้ schema=OCRResultList เข้าไปตรงๆ response จะตีกลับมาเป็น Pydantic object
             # เราสามารถเรียกใช้ .items หรือแปลงเป็น dict ได้เลย
@@ -187,6 +192,10 @@ def aggregate_results(state: OverallState):
 
             # รวมผลลัพธ์เข้ากับ compiled
             compiled.extend(data)
+
+            end_ocr_page = perf_counter()
+            token_meatadata = {str(datetime.now()): callback.usage_metadata,
+                        "processing_aggregate_time_seconds": (end_ocr_page - strat_ocr_page)}
                 
         except Exception as e:
             print(f"Error processing page result: {e}") 
@@ -196,47 +205,7 @@ def aggregate_results(state: OverallState):
 
     return {"final_compiled_results": compiled}
 
-# ประกอบ Graph นำ Components ทั้งหมดมาร้อยเรียงกัน
-builder = StateGraph(OverallState)
 
-# เพิ่ม Nodes
-builder.add_node("read_and_split_pdf", read_and_split_pdf)
-builder.add_node("process_ocr_page", process_ocr_page)
-builder.add_node("aggregate_results", aggregate_results) # เพิ่ม Node 
-
-# เพิ่ม Edges
-builder.add_edge(START, "read_and_split_pdf")
-
-# หลังจากอ่านไฟล์เสร็จ ใช้ conditional edges จัดการทำ Send Fan-Out
-builder.add_conditional_edges("read_and_split_pdf", continue_to_ocr)
-# พอมันรัน process_ocr_page เสร็จแบบคู่ขนานครบทุกตัว ให้ไหลมารวมที่ aggregate_results
-builder.add_edge("process_ocr_page", "aggregate_results")
-
-builder.add_edge("aggregate_results", END)
-
-# Compile LangGraph
-graph = builder.compile()
-
-if __name__ == "__main__":
-    # ระบุพาทไปยังไฟล์ PDF ของคุณ
-    pdf_file_path = Path("Documents/final_M5_022568.pdf")
-    
-    # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
-    start = perf_counter()
-    final_state = graph.invoke(
-        {"pdf_path": pdf_file_path, "ocr_results": [], "final_compiled_results": []},
-        config={"max_concurrency": 2} # ลดเหลือ 2 เพื่อป้องกัน 429 RESOURCE_EXHAUSTED จาก Gemini Free Tier
-    )
-    # บันทึก raw OCR results ลงไฟล์ (แต่ละหน้าต่อหนึ่งบรรทัด)
-    
-
-            
-    with open("output_Aggregate_GeminiAPI_results.json", "w", encoding="utf-8") as f:
-        # บันทึกข้อมูลที่ผ่านการรวมแล้วจาก Agent ลงไฟล์ JSON 
-        json.dump(final_state.get("final_compiled_results", []), f, ensure_ascii=False, indent=2)
-        
-    end = perf_counter()
-    print(f"Total processing time: {end - start:.2f} seconds")
   
     
     

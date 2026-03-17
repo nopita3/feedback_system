@@ -1,24 +1,16 @@
-from datetime import datetime
-
 from langchain_core.messages import HumanMessage
-from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
-
-from config import get_ollama_model
 
 import fitz  # PyMuPDF
 import base64
 import json
-from pathlib import Path    
 from time import perf_counter
+from datetime import datetime
+from fcntl import flock, LOCK_EX, LOCK_UN
+import re
 
 from Schemes.schema import OverallState, PageState
-import re
-from fcntl import flock, LOCK_EX, LOCK_UN
-
-
-
-
+from config import get_ollama_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
@@ -67,6 +59,7 @@ def process_ocr_page(state: PageState):
     
     # ระบุ format="json" เพื่อบังคับให้วิเคราะห์ผลออกมาเป็น JSON
     llm , callback  = get_ollama_model(model="qwen3.5:cloud")
+    strat_ocr_page = perf_counter()
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
@@ -111,7 +104,9 @@ def process_ocr_page(state: PageState):
             "content": "[]"
         }
 
-    token_meatadata = {str(datetime.now()): callback.usage_metadata}
+    end_ocr_page = perf_counter()
+    token_meatadata = {str(datetime.now()): callback.usage_metadata,
+                        "processing_ocr_each_page_time": (end_ocr_page - strat_ocr_page)}
     try:
         s = json.dumps(token_meatadata, ensure_ascii=False, default=str)
         with open("Token_OllamaCloud_usage_log.txt", "a", encoding="utf-8") as log_file:
@@ -120,6 +115,7 @@ def process_ocr_page(state: PageState):
             flock(log_file.fileno(), LOCK_UN)
     except Exception as e:
         print(f"Token log write error: {e}")
+
     return {"ocr_results": [result_data]}
 
 
@@ -174,10 +170,11 @@ def aggregate_results(state: OverallState):
         )
         
         try:
+            strat_ocr_page = perf_counter()
+
             response = llm.invoke([HumanMessage(content=prompt)])
             content_text = response.content if hasattr(response, 'content') else str(response)
 
-            token_meatadata = {str(datetime.now()): callback.usage_metadata}
             try:
                 s = json.dumps(token_meatadata, ensure_ascii=False, default=str)
                 with open("Token_Typhoon_ollama_usage_log.txt", "a", encoding="utf-8") as log_file:
@@ -216,6 +213,10 @@ def aggregate_results(state: OverallState):
                 compiled.extend(data["items"])
             elif isinstance(data, dict):
                 compiled.append(data)
+            
+            end_ocr_page = perf_counter()
+            token_meatadata = {str(datetime.now()): callback.usage_metadata,
+                                "processing_aggregate_time_seconds": (end_ocr_page - strat_ocr_page)}
                 
         except Exception as e:
             print(f"Error processing page result: {e}")
@@ -224,45 +225,6 @@ def aggregate_results(state: OverallState):
         
     return {"final_compiled_results": compiled}
 
-# ประกอบ Graph นำ Components ทั้งหมดมาร้อยเรียงกัน
-builder = StateGraph(OverallState)
 
-# เพิ่ม Nodes
-builder.add_node("read_and_split_pdf", read_and_split_pdf)
-builder.add_node("process_ocr_page", process_ocr_page)
-builder.add_node("aggregate_results", aggregate_results) # เพิ่ม Node 
-
-# เพิ่ม Edges
-builder.add_edge(START, "read_and_split_pdf")
-
-# หลังจากอ่านไฟล์เสร็จ ใช้ conditional edges จัดการทำ Send Fan-Out
-builder.add_conditional_edges("read_and_split_pdf", continue_to_ocr)
-# พอมันรัน process_ocr_page เสร็จแบบคู่ขนานครบทุกตัว ให้ไหลมารวมที่ aggregate_results
-builder.add_edge("process_ocr_page", "aggregate_results")
-
-builder.add_edge("aggregate_results", END)
-
-# Compile LangGraph
-graph = builder.compile()
-
-if __name__ == "__main__":
-    # ระบุพาทไปยังไฟล์ PDF ของคุณ
-    pdf_file_path = Path("Documents/final_M5_022568.pdf")
-    
-    # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
-    start = perf_counter()
-    final_state = graph.invoke(
-        {"pdf_path": pdf_file_path, "ocr_results": [], "final_compiled_results": []},
-        config={"max_concurrency": 2} # ลดเหลือ 2 เพื่อป้องกัน 429 RESOURCE_EXHAUSTED จาก Gemini Free Tier
-    )
-    # บันทึก raw OCR results ลงไฟล์ (แต่ละหน้าต่อหนึ่งบรรทัด)
-    
-
-    with open("output_Aggregate_Typhoon_results.json", "w", encoding="utf-8") as f:
-        # บันทึกข้อมูลที่ผ่านการรวมแล้วจาก Agent ลงไฟล์ JSON 
-        json.dump(final_state.get("final_compiled_results", []), f, ensure_ascii=False, indent=2)
-        
-    end = perf_counter()
-    print(f"Total processing time: {end - start:.2f} seconds")
 
     
