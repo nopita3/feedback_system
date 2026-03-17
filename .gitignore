@@ -5,3 +5,6 @@ __pycache__/
 output*
 *.json
 Token*
+*.csv
+*.xlsx
+*.log

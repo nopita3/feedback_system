@@ -1,5 +1,5 @@
-from langchain_core.messages import HumanMessage
 from langgraph.constants import Send
+from langchain_core.messages import HumanMessage
 
 import fitz  # PyMuPDF
 import base64
@@ -9,7 +9,7 @@ from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
 
 from Schemes.schema import OverallState, PageState, OCRResultList
-from config import get_gemini_model, create_cached_message
+from config import get_gemini_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
@@ -83,12 +83,7 @@ def process_ocr_page(state: PageState):
     content = [
         {"type": "text", "text": prompt_text},
         {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
-    ]
-    
-    # เพิ่ม cache control สำหรับ context caching
-    if content and isinstance(content[0], dict):
-        content[0]["cache_control"] = {"type": "ephemeral"}
-    
+    ]    
     message = HumanMessage(content=content)
     
     response = llm.invoke([message])
@@ -177,8 +172,9 @@ def aggregate_results(state: OverallState):
         try:
             strat_ocr_page = perf_counter()
             
-            # สร้าง message พร้อม cache control สำหรับ context caching
-            message = create_cached_message(prompt, cache_control=True)
+            # สร้าง message ปกติ
+            
+            message = HumanMessage(content=prompt)
             response = structured_model.invoke([message])
             
             try:

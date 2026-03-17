@@ -1,122 +1,52 @@
+from pathlib import Path
+import pandas as pd
 from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage , SystemMessage
 import json
-import os
-from dotenv import load_dotenv
+from config import get_gemini_model
 
-load_dotenv()
-api_key = os.getenv("openai_api_key")
+data = pd.read_csv(Path("Documents/Intensive_Physics_4.csv"))
 
-
-
+answer_col_list = [ col for col in data.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
+point_col_list = [ col for col in data.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
 
 
+data_complete = data[["StudentID", 'Earned Points'] + answer_col_list + point_col_list]
+data_complete["StudentID"] = data_complete["StudentID"].astype(str)
 
-def aggregate_results(page_data):
-    """
-    Process a single OCR page result and extract structured data.
-    
-    Args:
-        page_data (str): A single page OCR result (e.g., "--- Page 1 ---\n[...]")
-    
-    Returns:
-        list: Extracted question data as list of dicts
-    """
-    
-    llm = ChatOpenAI(model="gpt-5-mini", temperature=0, format="json" , api_key=api_key)
-    
-    prompt = (
-        "คุณคือผู้ช่วยแยกวิเคราะห์ JSON ที่ได้จากการทำ OCR\n"
-        "หน้าที่ของคุณ: นำข้อมูล JSON ของหน้านี้มา และสกัดเฉพาะส่วน 'items' ออกมา\n\n"
-        "ถ้าข้อมูลเป็น JSON Array อยู่แล้ว ให้ตอบกลับเป็น JSON Object ที่มีโครงสร้าง:\n"
-        "{\n"
-        '  "items": [...]\n'
-        "}\n\n"
-        "ตัวอย่างผลลัพธ์:\n"
-        "{\n"
-        '  "items": [\n'
-        "    {\n"
-        '      "question_id": "1",\n'
-        '      "question_content": "เนื้อหาข้อ",\n'
-        '      "skill_tags": ["ทักษะ"],\n'
-        '      "error_type": "จุดผิดพลาด",\n'
-        '      "image_description": "รูปภาพ"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        f"ข้อมูลของหน้านี้:\n{page_data}"
-    )
-    
-    try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        print(f"LLM Response:\n{response.content}\n")
-        
-        data = json.loads(response.content)
-        
-        # ดึง items ออกมา
-        if isinstance(data, dict) and "items" in data:
-            items = data["items"]
-        elif isinstance(data, list):
-            items = data
-        else:
-            items = []
-        
-        print(f"Extracted {len(items)} items from this page\n")
-        return items
-            
-    except Exception as e:
-        print(f"Error processing page: {e}\n")
-        return []
+sample = data_complete.sample(3, random_state=42)
+test_json = json.load(open("output_Aggregate_GeminiAPI_results.json", "r"))
 
 
-if __name__ == "__main__":
-    import re
+
+
+
+for i, row in sample.iterrows():
+    print(f"{"="*20} Analyzing StudentID: {i} {'='*20}")
+    row = row.to_dict()
+    row = {k: row[k] for k in ["StudentID"] + point_col_list}
+    # llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json")
+    llm, callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
+    system_message = SystemMessage(content=f"""
+                                                ระบบปัญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
+                                                ร่วมกับข้อมูลข้อสอบที่นักเรียนใช้สอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย
+                                                ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง 
+                                                แนวการตอบของระบบ
+                                                1. ให้ระบุว่ามาจากการวิเคราะห์ด้วยปัญญาประดิษฐ์เสมอ
+                                                2. บอกผลการวิเคราะห์ว่าเป็นของนักเรียนรหัสใด และร้อยละของคะแนนที่ได้รับ เช่น จากการวิเคราะห์ข้อมูลของนักเรียนรหัส 12345 พบว่า ...
+                                                3. ผลการวิเคราะห์ที่ไม่ต้องระบุว่าผิดข้อไหน(เช่น (ข้อ17) ไม่ต้องใส่มาแล้วนะ) แต่บอกเป็นภาพรวมในจุดที่ทำได้แล้ว และจุดที่ยังทำไม่ได้แ ต่ต้องแบบทุก concept นะอย่าสรุปจนมีสาระใดที่หายไปเพราะนั่นคือการปะรอยรั่วที่ไม่หมดยังไงก็จะรั่วต่อไป (เช่น นักเรียนสามารถคำนวณข้อที่เกี่ยวกับพื้นฐานทางไฟฟ้าได้ และ .... แต่ยังมีปัญหาในโจทย์ที่ซับซ้อนเรื่อง ... )
+                                                4. ให้แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้
+                                                5. ตอบด้วยน้ำเสียงที่เข้าถึงง่ายเหมาะกับเด็กนักเรียนไทยในช่วงมัธยมปลาย และใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
+                                                6. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่อชน แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
+
+                                                โดยข้อมูลของข้อสอบมีดังนี้: {str(test_json)}
+                                            """)
     
-    with open("OCR_results.txt", "r", encoding="utf-8") as f:
-        ocr_results_content = f.read()
+    human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {row["StudentID"]} ได้รับคะแนนในแต่ละข้อดังนี้ { {k: row[k] for k in point_col_list} } 
+                                         กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
+   
+    response = llm.invoke([system_message, human_message])
+    print(response.content[0]['text'].strip())
     
-    # แยก "--- Page X ---" sections โดยใช้ regex
-    try:
-        # Split by page markers แต่เก็บ markers ไว้
-        parts = re.split(r'(--- Page \d+ ---)', ocr_results_content)
-        
-        ocr_pages = []
-        # parts จะเป็น: ['', '--- Page 1 ---', 'content1', '--- Page 2 ---', 'content2', ...]
-        for i in range(1, len(parts), 2):
-            if i + 1 < len(parts):
-                # รวม marker กับ content
-                page_content = parts[i] + parts[i + 1]
-                if page_content.strip():
-                    ocr_pages.append(page_content.strip())
-        
-        if not ocr_pages:
-            ocr_pages = [ocr_results_content]
-            
-    except Exception as e:
-        print(f"Error parsing OCR_results.txt: {e}")
-        ocr_pages = [ocr_results_content]
-    
-    print(f"Found {len(ocr_pages)} pages to process\n")
-    
-    # ประมวลผลแต่ละหน้าทีละหนึ่ง และเก็บผลลัพธ์
-    all_results = []
-    
-    for idx, page_data in enumerate(ocr_pages, 1):
-        print(f"========== Processing Page {idx} ==========")
-        
-        # ส่งหน้านี้ไปยัง LLM
-        page_items = aggregate_results(page_data)
-        
-        # เพิ่มผลลัพธ์เข้าไปใน list
-        all_results.extend( page_items)
-        
-        print(f"Total accumulated items so far: {len(all_results)}\n")
-        print(f"Extracted items: {(all_results)}\n")
-    
-    # บันทึกผลลัพธ์ทั้งหมดลงไฟล์ JSON
-    print("Writing final results to Aggregate_results.json...")
-    with open("Aggregate_results.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, ensure_ascii=False, indent=2)
-    
-    print(f"\nDone! Processed {len(ocr_pages)} pages and extracted {len(all_results)} total items.")
+    print(f"token usage: {callback.usage_metadata}\n")
+    print("\n")
