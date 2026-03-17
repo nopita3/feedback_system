@@ -9,7 +9,7 @@ from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
 
 from Schemes.schema import OverallState, PageState, OCRResultList
-from config import  get_gemini_model
+from config import get_gemini_model, create_cached_message
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
@@ -79,13 +79,17 @@ def process_ocr_page(state: PageState):
         "ถ้าหน้านั้นไม่ใช่ข้อสอบ ให้ข้ามไปเลยไม่ต้องส่งคำตอบของข้อมูลเหล่านั้นมาสิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบ\n "
     )
     
-    # ส่ง Message แบบระบุ base64 ใน image_url
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": prompt_text},
-            {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
-        ]
-    )
+    # ส่ง Message แบบระบุ base64 ใน image_url พร้อม cache control
+    content = [
+        {"type": "text", "text": prompt_text},
+        {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
+    ]
+    
+    # เพิ่ม cache control สำหรับ context caching
+    if content and isinstance(content[0], dict):
+        content[0]["cache_control"] = {"type": "ephemeral"}
+    
+    message = HumanMessage(content=content)
     
     response = llm.invoke([message])
     
@@ -172,7 +176,10 @@ def aggregate_results(state: OverallState):
         
         try:
             strat_ocr_page = perf_counter()
-            response = structured_model.invoke([HumanMessage(content=prompt)])
+            
+            # สร้าง message พร้อม cache control สำหรับ context caching
+            message = create_cached_message(prompt, cache_control=True)
+            response = structured_model.invoke([message])
             
             try:
                 with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
