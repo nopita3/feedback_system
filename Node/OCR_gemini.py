@@ -177,14 +177,6 @@ def aggregate_results(state: OverallState):
             message = HumanMessage(content=prompt)
             response = structured_model.invoke([message])
             
-            try:
-                with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-                    flock(log_file.fileno(), LOCK_EX)
-                    log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-                    flock(log_file.fileno(), LOCK_UN)
-            except Exception as e:
-                print(f"Token log write error: {e}")
-            
             # เนื่องจากใช้ schema=OCRResultList เข้าไปตรงๆ response จะตีกลับมาเป็น Pydantic object
             # เราสามารถเรียกใช้ .items หรือแปลงเป็น dict ได้เลย
             if hasattr(response, 'items'):
@@ -199,6 +191,14 @@ def aggregate_results(state: OverallState):
             end_ocr_page = perf_counter()
             token_meatadata = {str(datetime.now()): callback.usage_metadata,
                         "processing_aggregate_time_seconds": (end_ocr_page - strat_ocr_page)}
+            
+            try:
+                with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+                    flock(log_file.fileno(), LOCK_EX)
+                    log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
+                    flock(log_file.fileno(), LOCK_UN)
+            except Exception as e:
+                print(f"Token log write error: {e}")
                 
         except Exception as e:
             print(f"Error processing page result: {e}") 
