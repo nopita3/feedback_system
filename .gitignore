@@ -7,4 +7,4 @@ output*
 Token*
 *.csv
 *.xlsx
-*.log
+*log

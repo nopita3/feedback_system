@@ -1,62 +1,15 @@
 from datetime import datetime
-from pathlib import Path
 from time import perf_counter
-from typing import Annotated
 import pandas as pd
-from langchain_ollama import ChatOllama
 from fcntl import flock, LOCK_EX, LOCK_UN
-from langgraph.graph import StateGraph, START, END
-from langgraph.constants import Send
-import operator
-from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage , SystemMessage
+from langgraph.constants import Send
 import json
 from config import get_gemini_model
+from Schemes.schema import OverallState,  FeedbackResult, Student
 
-data = pd.read_csv(Path("Documents/Intensive_Physics_4.csv"))
-
-answer_col_list = [ col for col in data.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
-point_col_list = [ col for col in data.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
-key_list = [{col: data.loc[0,col]} for col in data.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
-
-
-data_complete = data[["StudentID", 'Earned Points'] + answer_col_list + point_col_list]
-data_complete["StudentID"] = data_complete["StudentID"].astype(str)
-
-sample = data_complete.sample(10, random_state=42)
-test_json = json.load(open("output_Aggregate_Gemini_results.json", "r"))
-
-class Student(BaseModel):
-    student_id: str = Field( description="รหัสประจำตัวนักเรียน")
-    Earned_points: int = Field( description="คะแนนรวมที่ได้รับ")
-    chosen_answers: list[dict] = Field( description="คำตอบที่นักเรียนเลือกในแต่ละข้อ เช่น { 'Stu1': '1', ... }")
-    point_per_question: list[dict] = Field( description="คะแนนที่นักเรียนได้รับในแต่ละข้อ เช่น { 'Points1': 1, 'Points2': 0, ... }")
-
-class FeedbackResult(BaseModel):
-    student_id: str = Field( description="รหัสประจำตัวนักเรียน")
-    total_points: int = Field( description="คะแนนรวมที่ได้รับ")
-    percentage: float = Field( description="ร้อยละของคะแนนที่ได้รับ")
-    feedback_details: str = Field( description='รายละเอียด feedback ที่ต้องระบุใน feedback ดังนี้ {"concept/skill/ความเข้าใจ ที่นักเรียนทำได้ดีแล้วในแต่ละข้อ": "...", "จุดconcept/skill/ความเข้าใจ ที่ยังทำไม่ได้": "...", "แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้": "...", "concern จาก error_types": "..." }')
-
-
-class test_state(BaseModel):
-    student_test_path: Path
-    key_answer: list[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
-
-    final_compiled_results: list[dict] = Field(description="ผลลัพธ์ OCR ที่ได้จากการประมวลผลแต่ละหน้า")
-    student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
-
-    feedback : Annotated[list[FeedbackResult], operator.add] = Field(default_factory=list)
-    
-    # สำหรับ iteration loop ของแต่ละ student - ใช้ dict เพื่อ track per student
-    student_feedback_state: dict = Field(default_factory=dict, description="Dict {student_id: {iteration_count, review_results, feedback}}") 
-    
-
-
-test_builder = StateGraph(test_state)
-
-def extract_student_information(state: test_state):
-    df = pd.read_csv(state.student_test_path).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+def extract_student_information(state: OverallState):
+    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
     point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
     answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
 
@@ -71,14 +24,14 @@ def extract_student_information(state: test_state):
     
     return {"student_information": student_info}
 
-def continue_to_feedback(state: test_state):
+def continue_to_feedback(state: OverallState):
     
-    return [Send("process_feedback", {"student_information": student, "final_compiled_results": state.final_compiled_results}) 
-        for _, student in enumerate(state.student_information)]
+    return [Send("process_feedback", {"student_information": student, "ocr_results": state["ocr_results"]}) 
+        for _, student in enumerate(state["student_information"])]
 
 
     
-def process_feedback(state: dict):
+def process_feedback(state: OverallState):
 
     student = state['student_information']
     llm, callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
@@ -110,7 +63,7 @@ def process_feedback(state: dict):
                                                     6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
                                                     7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
 
-                                                    การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {str(test_json)}
+                                                    การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_results"]}
                                                     {revision_prompt}
                                                 """)
         
@@ -178,14 +131,15 @@ def review_feedback_internal(feedback: FeedbackResult) -> tuple:
         •	ด้านรายละเอียดและความถูกต้องของข้อมูล (Detail and Accuracy of Information): การแสดงรายละเอียดครบถ้วน และมีความถูกต้องของข้อมูลที่กำหนดไว้ในวัตถุประสงค์การประเมินผลนอกจากนี้
         •	ด้านความเหมาะสมของการใช้ภาษาในการให้คำแนะนำ (Appropriateness of Language):  ปัญญหาประดิษฐ์ควรใช้ภาษาที่สร้างสรรค์และให้กำลังใจ เพื่อรักษาสภาพแวดล้อมการเรียนรู้เชิงบวก โดยไม่ชมเชยจนเกินจริง 
         •	ด้านความชัดเจนและการสื่อความหมาย (Clarity and Communication): ยึดตามมิติ Linguistic Clarity ของ Seßler et al. (2025) ที่ประเมินความชัดเจนของโครงสร้างประโยค เพื่อให้ผู้เรียนระดับเป้าหมายสามารถทำความเข้าใจได้ง่าย ไม่ซับซ้อน ซึ่งตรงกับเกณฑ์ Clarity of Feedback ในแบบประเมินผู้เชี่ยวชาญของ Chung (2025)
-
-        รีวิว feedback และตอบกลับเป็น JSON ในรูปแบบนี้:
+        เพื่อให้การรีวิวมีความเป็นระบบและสามารถประเมินได้อย่างมีประสิทธิภาพ 
+        การรีวิวเนื้อหา feedback และตอบกลับเป็น JSON ในรูปแบบนี้:
         {
           "is_acceptable": true/false,
           "quality_score": 1-10,
           "issues": ["issue1", "issue2"],
           "suggestions": ["suggestion1", "suggestion2"]
         }
+        ต้องสามารถนำไปพัฒนาให้เหมาะสมและดียิ่งขึ้นได้ต่อไปได้อย่างชัดเจน                          
     """)
     
     review_message = HumanMessage(content=f"""
@@ -216,70 +170,3 @@ def review_feedback_internal(feedback: FeedbackResult) -> tuple:
         )
     except:
         return (False, 5, ["Parse error"], ["Regenerate feedback"])
-
-
-test_builder.add_node("extract_student_information", extract_student_information)
-test_builder.add_node("process_feedback", process_feedback)
-
-test_builder.add_edge(START, "extract_student_information")
-test_builder.add_conditional_edges("extract_student_information", continue_to_feedback)
-test_builder.add_edge("process_feedback", END)
-
-
-graph = test_builder.compile()
-result = graph.invoke({"student_test_path": Path("Documents/Intensive_Physics_4.csv"), "key_answer": key_list, "final_compiled_results": test_json},config={"max_concurrency": 2})
-print(f"Total feedbacks generated: {len(result.get('feedback', []))}")
-
-
-
-
-
-# for i, row in sample.iterrows():
-#     print(f"{"="*20} Analyzing StudentID: {i} {'='*20}")
-#     row = row.to_dict()
-#     row = {k: row[k] for k in ["StudentID", "Earned Points"] + point_col_list}
-#     # llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json")
-#     from time import perf_counter
-#     start_ocr_page = perf_counter()
-#     llm, callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
-#     system_message = SystemMessage(content=f"""
-#                                                 ระบบปัญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
-#                                                 ร่วมกับข้อมูลข้อสอบที่นักเรียนใช้สอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย
-#                                                 ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง เพื่อให้ feedback ให้กับนักเรียนในการปรับปรุงการเรียนรู้และปิดช่องว่างการเรียนรู้ที่เกิดขึ้น
-#                                                 แนวการตอบของระบบ
-#                                                 1. ให้ระบุว่ามาจากการวิเคราะห์ด้วยปัญญาประดิษฐ์เสมอ
-#                                                 2. ระบุข้อมูลประจำตัวนักเรียนดังนี้
-#                                                 \t2.1 รหัสประจำตัวนักเรียน: {row['StudentID']}
-#                                                 \t2.2 คะแนนรวมที่ได้รับ: {row['Earned Points']} คะแนน จากคะแนนเต็ม {len(point_col_list)} คะแนน
-#                                                 \t2.3 ร้อยละของคะแนนที่ได้รับ: {row['Earned Points'] / len(point_col_list) * 100:.2f}%
-#                                                 3. รายระเอียดที่ต้องระบุใน feedback ดังนี้
-#                                                 \t3.1 concept/skill/ความเข้าใจ ที่นักเรียนทำได้ดีแล้วในแต่ละข้อ (เช่น นักเรียนสามารถคำนวณข้อที่เกี่ยวกับพื้นฐานทางไฟฟ้าได้ดีแล้ว)
-#                                                 \t3.2 จุดconcept/skill/ความเข้าใจ ที่ยังทำไม่ได้ โดยต้องระบุทุกจุด(เช่น ในจุดที่นักเรียนต้องพัฒนาต่อไป 1. ... 2. ... 3.ยังมีปัญหาในโจทย์ที่ซับซ้อนเรื่อง ... , 4. ... )
-#                                                 \t3.3 แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้ โดยต้องระบุทุกจุดที่ยังทำไม่ได้ (เช่น แนวทางในการพัฒนาตัวเอง ได้แก่ 1. ... 2. ... 3. ...)
-#                                                 \t3.4 การระบุ concept/skill/ความเข้าใจ ไม่ต้องบอกเลขข้อว่าทำข้อไหนได้หรือไม่ได้ แต่ให้บอกเป็น concept/skill/ความเข้าใจที่นักเรียนทำได้หรือยังทำไม่ได้ในแต่ละข้อสอบแทน
-#                                                 \t3.5 ต้องระบุทุก concept ห้ามตกหล่นรวมถึงข้อ concern จาก error_types
-#                                                 5. ตอบด้วยน้ำเสียงที่เข้าถึงง่ายเหมาะกับเด็กนักเรียนไทยในช่วงมัธยมปลาย 
-#                                                 6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
-#                                                 7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
-
-#                                                 การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {str(test_json)}
-#                                             """)
-    
-#     human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {row["StudentID"]} ได้รับคะแนนในแต่ละข้อดังนี้ { {k: row[k] for k in point_col_list} } 
-#                                          กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
-   
-#     response = llm.invoke([system_message, human_message] , temperature=0.2)
-    
-#     with open(f"output_feedback.txt", "a", encoding="utf-8") as f:
-#         f.write(f"{"="*20} Analyzing StudentID: {row['StudentID']} {'='*20}\n")
-#         f.write(response.content[0]['text'].strip()+f"\n {"*"*80} \n\n")
-#     from datetime import datetime
-    
-#     end_ocr_page = perf_counter()
-#     token_meatadata = {str(datetime.now()): callback.usage_metadata,
-#                         "processing_aggregate_time_seconds": (end_ocr_page - start_ocr_page)} 
-#     with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-                    
-#         log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-                    
-    

@@ -8,7 +8,7 @@ from datetime import datetime
 from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
 
-from Schemes.schema import OverallState, PageState, OCRResultList
+from Schemes.schema import OverallState, PageState, OCRResult
 from config import get_gemini_model
 
 
@@ -57,156 +57,95 @@ def process_ocr_page(state: PageState):
 
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
-    
-    llm , callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
+
+    model_name = "gemini-3.1-flash-lite-preview"
+    llm , callback  = get_gemini_model(model=model_name)
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
         "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ "
         "โปรดสกัดข้อมูลจากรูปภาพข้อสอบและนำเสนอในรูปแบบ JSON Array เท่านั้น "
-        "เงื่อนไขสำคัญ: **ไม่ต้องพิมพ์ตัวเลือก (ก, ข, ค, ง) ให้พิมพ์เฉพาะท่อนที่เป็นคำถามหรือโจทย์เดี่ยวๆ**\n\n"
         "กรุณาตอบเป็น JSON ในรูปแบบนี้:\n"
         "[\n"
         "  {\n"
         '    "question_id": "เลขข้อ",\n'
-        '    "question_content": "เนื้อหาโจทย์ (ไม่เอาตัวเลือก)",\n'
+        '    "question_content": "เนื้อหาเฉพาะส่วนคำถามของโจทย์ (ไม่เอาตัวเลือก)",\n'
         '    "skill_tags": ["ทักษะที่เกี่ยวข้อง เช่น การวิเคราะห์ระบบ, การคำนวณสูตร"],\n'
-        '    "error_type": "จุดผิดพลาดที่ผู้เรียนมักจะทำผิด หรือเว้นขีด - ไว้",\n'
+        '    "misconcept_type": [{"1": "คำนวณผิดพลาด", "2": "แยกประเภทวงจรขนานกับอนุกรมไม่ได้", "3": "เข้าใจและแก้ปัญหาถูกต้อง", ...(พิมพ์ให้ครบทุกตัวเลือกและวิเคราะห์ให้ถูกต้อง)...}],\n'
         '    "image_description": "คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง"\n'
         "  }\n"
         "]\n"
         "ห้ามเกริ่นนำใดๆ ตอบเป็น JSON Array เท่านั้น\n"
-        "ถ้าหน้านั้นไม่ใช่ข้อสอบ ให้ข้ามไปเลยไม่ต้องส่งคำตอบของข้อมูลเหล่านั้นมาสิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบ\n "
+        "ถ้าหน้านั้นไม่ใช่ข้อสอบ เช่นระเบียบการสอบ สมการจำเป็น ให้ข้ามไปเลยไม่ต้องส่งคำตอบของข้อมูลเหล่านั้นมา สิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบ\n"
+        "ข้อมูลที่ไม่มีตัวเลือกก็ให้ข้ามได้เลย ไม่เอาข้อที่แสดงวิธีทำ\n"
+        "ถ้าไม่มี misconcept_type ไม่ต้องพิมพ์เครื่องหมายขีด ให้เว้นว่างเป็น [] ไว้\n"
     )
     
-    # ส่ง Message แบบระบุ base64 ใน image_url พร้อม cache control
-    content = [
-        {"type": "text", "text": prompt_text},
-        {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
-    ]    
-    message = HumanMessage(content=content)
+    # ส่ง Message แบบระบุ base64 ใน image_url
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
+        ]
+    )
     
     response = llm.invoke([message])
     
-    # เมื่อใช้ Gemini แบบปกติ ค่าที่ได้จะเป็น AIMessage ที่มี content แต่ตอนนี้มันมี metadata ปนมาด้วย
-    # เราจึงสกัดเฉพาะส่วนที่เป็น .content (ซึ่งเป็น text JSON) ออกมาก่อน 
-    content_text = response.content if hasattr(response, 'content') else str(response)
+    # Extract JSON text from response content
+    # Response จาก Gemini อาจเป็น AIMessage ที่มี content เป็น text string โดยตรง
+    # หรืออาจเป็น list ของ content blocks
+    if isinstance(response.content, str):
+        content_text = response.content
+    elif isinstance(response.content, list):
+        # ถ้า content เป็น list ให้หา text block
+        text_blocks = [block.get('text', '') if isinstance(block, dict) 
+                       else str(block) for block in response.content]
+        content_text = ''.join(text_blocks)
+    else:
+        content_text = str(response.content)
 
-    result_data = {
-        "page_num": page_num,
-        "content": content_text
-    }
     end_ocr_page = perf_counter()
 
     token_meatadata = {str(datetime.now()): callback.usage_metadata,
-                        "processing_ocr_each_page_time": (end_ocr_page - strat_ocr_page)}
+                        "processing_time": (end_ocr_page - strat_ocr_page),
+                        "agent_work": "OCR and Extract information each page",
+                        "Platform": "Google" }
     try:
-        with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
+        with open("Token_usage_log.txt", "a", encoding="utf-8") as log_file:
             flock(log_file.fileno(), LOCK_EX)
             log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
             flock(log_file.fileno(), LOCK_UN)
     except Exception as e:
         print(f"Token log write error: {e}")
     
-    
-    
-
-    return {"ocr_results": [result_data]}
-
-# Node: Agent รวมคำตอบทั้งหมดให้อยู่ใน List เดียวกัน โดยประมวลผลแต่ละหน้า
-def aggregate_results(state: OverallState):
-
-    with open("output_OCR_Gemini_results.txt", "w", encoding="utf-8") as f:
-        # ดึงมา sort ให้สวยงามก่อนเขียนลงไฟล์
-        sorted_results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
-        for result in sorted_results:
-            page = result["page_num"]
-            content = result["content"]
-            f.write(f"--- Page {page} ---\n{content}\n")
-
-    print("aggregate_results is running...")
-    
-    """
-    Aggregate and consolidate OCR results from all processed pages.
-    
-    This node processes each page individually through an LLM and combines
-    all results into a single structured list. It processes page-by-page
-    and extends the compiled results with each page's output.
-    
-    Args:
-        state (OverallState): Contains ocr_results list from all processed pages
-    
-    Returns:
-        dict: Contains final_compiled_results as a consolidated list of OCR data
-    """
-    
-    # เปลี่ยนกลับเป็นโมเดลที่เสถียรกับการทำ Structured Output
-    llm , callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
-    structured_model = llm.with_structured_output(schema=OCRResultList, method="json_schema")
-
-    results = sorted(state.get("ocr_results", []), key=lambda x: x["page_num"])
-    
-    compiled = []
-    
-    # ประมวลผลแต่ละหน้าทีละหน้า
-    for result in results:
-        prompt = (
-            "คุณคือผู้ช่วยประมวลผลข้อมูล OCR จากหน้า PDF\n"
-            "หน้าที่ของคุณ: นำผลลัพธ์ JSON จากหน้าหนึ่ง มาจัดรูปแบบให้เป็น JSON Array ของ objects\n\n"
-            "**เงื่อนไขสำคัญ:**\n"
-            "ส่วนไหนเป็นสมการให้ใส่ format LaTeX ได้เลย เช่น $E=mc^2$ \n"
-            "ต้องตอบกลับเป็น JSON Array เท่านั้น ตามตัวอย่างนี้:\n"
-            "[\n"
-            "  {\n"
-            '    "question_id": "1",\n'
-            '    "question_content": "เนื้อหาข้อ 1",\n'
-            '    "skill_tags": ["ทักษะ 1", "ทักษะ 2"],\n'
-            '    "error_type": "ข้อผิดพลาดที่พบบ่อย",\n'
-            '    "image_description": "คำอธิบายรูปภาพ หรือ -"\n'
-            "  }\n"
-            "]\n\n"
-            "ห้ามเพิ่มข้อมูลใดๆ แค่จัดรูปแบบตามโครงสร้างเท่านั้น\n"
-            f"ข้อมูลหน้านี้:\n{result['content']}"
-        )
+    # Parse JSON string เป็น list ของ dict แล้วแปลงเป็น OCRResult objects
+    ocr_results = []
+    try:
+        ocr_data_list = json.loads(content_text)
+        if not isinstance(ocr_data_list, list):
+            ocr_data_list = [ocr_data_list]
         
-        try:
-            strat_ocr_page = perf_counter()
-            
-            # สร้าง message ปกติ
-            
-            message = HumanMessage(content=prompt)
-            response = structured_model.invoke([message])
-            
-            # เนื่องจากใช้ schema=OCRResultList เข้าไปตรงๆ response จะตีกลับมาเป็น Pydantic object
-            # เราสามารถเรียกใช้ .items หรือแปลงเป็น dict ได้เลย
-            if hasattr(response, 'items'):
-                # แปลง Pydantic ข้อมูลย่อยให้อยู่ในรูป dict เพื่อเอาไป save JSON ได้
-                data = [item.model_dump() for item in response.items]
-            else:
-                data = []
+        # แปลง dict เป็น OCRResult objects - skip empty items
+        for item in ocr_data_list:
+            if item:  # ตรวจสอบว่า item ไม่ว่างเปล่า
+                try:
+                    ocr_results.append(OCRResult(**item))
+                except Exception as item_error:
+                    print(f"Skipping invalid OCR item on page {page_num}: {item_error}")
+        
+        with open("output_OCR_output_debug.txt", "a", encoding="utf-8") as debug_file:
+            flock(debug_file.fileno(), LOCK_EX)
+            debug_file.write(f"{json.dumps(ocr_data_list, ensure_ascii=False, indent=2)}\n\n")
+            flock(debug_file.fileno(), LOCK_UN)
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON from page {page_num}: {e}")
+        print(f"Content was: {content_text[:200]}...")  # Print first 200 chars for debugging
+    except Exception as e:
+        print(f"Error creating OCRResult objects on page {page_num}: {e}")
 
-            # รวมผลลัพธ์เข้ากับ compiled
-            compiled.extend(data)
+    return {"ocr_results": ocr_results}
 
-            end_ocr_page = perf_counter()
-            token_meatadata = {str(datetime.now()): callback.usage_metadata,
-                        "processing_aggregate_time_seconds": (end_ocr_page - strat_ocr_page)}
-            
-            try:
-                with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-                    flock(log_file.fileno(), LOCK_EX)
-                    log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-                    flock(log_file.fileno(), LOCK_UN)
-            except Exception as e:
-                print(f"Token log write error: {e}")
-                
-        except Exception as e:
-            print(f"Error processing page result: {e}") 
-            continue
 
-    
-
-    return {"final_compiled_results": compiled}
 
 
   
