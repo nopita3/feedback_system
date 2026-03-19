@@ -38,11 +38,10 @@ class OverallState(TypedDict):
     key_answer: List[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
     student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
 
-    ocr_results: Annotated[List[OCRResult], operator.add] # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
+    ocr_results: Annotated[List[OCRResult], operator.add] = Field(default_factory=list) # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
 
     feedback : Annotated[list[FeedbackResult], operator.add] = Field(default_factory=list)
-    # สำหรับ iteration loop ของแต่ละ student - ใช้ dict เพื่อ track per student
-    student_feedback_state: dict = Field(default_factory=dict, description="Dict {student_id: {iteration_count, review_results, feedback}}") 
+    
 
     
 

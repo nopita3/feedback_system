@@ -2,6 +2,7 @@ from langgraph.constants import Send
 from langchain_core.messages import HumanMessage
 
 import fitz  # PyMuPDF
+import pandas as pd
 import base64
 import json 
 from datetime import datetime
@@ -15,6 +16,8 @@ from config import get_gemini_model
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
     doc = fitz.open(state["pdf_path"])
+    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
+    key_list = [ {col: df.loc[0, col]} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
     pages_list = []
     
     for page_num in range(len(doc)):
@@ -27,12 +30,12 @@ def read_and_split_pdf(state: OverallState):
         b64_img = base64.b64encode(img_bytes).decode("utf-8")
         pages_list.append(b64_img)
         
-    return {"pages": pages_list}
+    return {"pages": pages_list , "key_answer": key_list}
 
 # Conditional Edge (Fan-out): บอก LangGraph ให้แตก Node การทำงานแบบ Parallel ตามจำนวนหน้า
 def continue_to_ocr(state: OverallState):
     return [
-        Send("process_ocr_page", {"page_b64": page, "page_num": i + 1}) 
+        Send("process_ocr_page", {"page_b64": page, "page_num": i + 1 , "key_list": state["key_answer"]}) 
         for i, page in enumerate(state["pages"])
     ]
 
@@ -57,13 +60,14 @@ def process_ocr_page(state: PageState):
 
     page_b64 = state["page_b64"]
     page_num = state["page_num"]
+    key_list = state["key_list"]
 
     model_name = "gemini-3.1-flash-lite-preview"
     llm , callback  = get_gemini_model(model=model_name)
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
-        "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ "
+        "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง  "
         "โปรดสกัดข้อมูลจากรูปภาพข้อสอบและนำเสนอในรูปแบบ JSON Array เท่านั้น "
         "กรุณาตอบเป็น JSON ในรูปแบบนี้:\n"
         "[\n"
@@ -85,19 +89,17 @@ def process_ocr_page(state: PageState):
     message = HumanMessage(
         content=[
             {"type": "text", "text": prompt_text},
+            {"type": "text", "text": f"คำตอบที่ถูกต้องของข้อสอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) มีดังนี้: {key_list}\n"},
             {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
         ]
     )
     
     response = llm.invoke([message])
     
-    # Extract JSON text from response content
-    # Response จาก Gemini อาจเป็น AIMessage ที่มี content เป็น text string โดยตรง
-    # หรืออาจเป็น list ของ content blocks
+    
     if isinstance(response.content, str):
         content_text = response.content
     elif isinstance(response.content, list):
-        # ถ้า content เป็น list ให้หา text block
         text_blocks = [block.get('text', '') if isinstance(block, dict) 
                        else str(block) for block in response.content]
         content_text = ''.join(text_blocks)

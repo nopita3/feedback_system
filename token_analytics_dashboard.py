@@ -5,16 +5,33 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
+import time
 
 # Page configuration
 st.set_page_config(page_title="Token Analytics Dashboard", layout="wide")
 st.title("📊 Token Usage Analytics Dashboard")
 
+# Initialize session state for refresh
+if 'last_file_mod_time' not in st.session_state:
+    st.session_state.last_file_mod_time = {}
+if 'refresh_count' not in st.session_state:
+    st.session_state.refresh_count = 0
+
+def get_file_mod_time(file_path):
+    """Get file modification time to detect changes."""
+    try:
+        if Path(file_path).exists():
+            return Path(file_path).stat().st_mtime
+    except:
+        pass
+    return None
+
 @st.cache_data
-def read_token_logs(file_paths):
+def read_token_logs(file_paths, cache_key=0):
     """
     Read multiple token log files and create a combined dataframe.
     Supports both old format and new format with agent_work metadata.
+    cache_key parameter allows cache invalidation when files change.
     """
     data = []
     
@@ -77,7 +94,45 @@ log_files = [
     'Token_usage_log.txt'
 ]
 
-df = read_token_logs(log_files)
+# Check if any log files have been modified
+cache_key = 0
+for log_file in log_files:
+    mod_time = get_file_mod_time(log_file)
+    if mod_time:
+        if log_file not in st.session_state.last_file_mod_time:
+            st.session_state.last_file_mod_time[log_file] = mod_time
+            cache_key += 1
+        elif mod_time != st.session_state.last_file_mod_time[log_file]:
+            st.session_state.last_file_mod_time[log_file] = mod_time
+            cache_key += 1
+
+# Add auto-refresh option in sidebar
+st.sidebar.markdown("---")
+col_refresh = st.sidebar.columns([2, 1])
+with col_refresh[0]:
+    auto_refresh = st.sidebar.checkbox("🔄 Enable Auto-Refresh", value=False)
+    refresh_interval = st.sidebar.slider("Refresh every (seconds):", 5, 60, 10) if auto_refresh else None
+with col_refresh[1]:
+    if st.sidebar.button("🔃 Manual Refresh"):
+        st.session_state.refresh_count += 1
+        st.rerun()
+
+# Auto-refresh logic
+if auto_refresh and refresh_interval:
+    with st.sidebar:
+        placeholder = st.empty()
+        
+    import time as time_module
+    
+    def refresh_loop():
+        for i in range(refresh_interval, 0, -1):
+            placeholder.write(f"Next refresh in: {i}s")
+            time_module.sleep(1)
+    
+    refresh_loop()
+    st.rerun()
+
+df = read_token_logs(log_files, cache_key=cache_key)
 
 if df.empty:
     st.error("❌ No data found. Please check the log files.")
@@ -226,7 +281,7 @@ with tab1:
         showlegend=True
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Horizontal bar chart for each token type separately
     col1, col2, col3 = st.columns(3)
@@ -242,7 +297,7 @@ with tab1:
             color_continuous_scale='Blues'
         )
         fig_input.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_input, use_container_width=True)
+        st.plotly_chart(fig_input, width='stretch')
     
     with col2:
         fig_output = px.bar(
@@ -255,7 +310,7 @@ with tab1:
             color_continuous_scale='Reds'
         )
         fig_output.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_output, use_container_width=True)
+        st.plotly_chart(fig_output, width='stretch')
     
     with col3:
         fig_total = px.bar(
@@ -268,7 +323,7 @@ with tab1:
             color_continuous_scale='Greens'
         )
         fig_total.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_total, use_container_width=True)
+        st.plotly_chart(fig_total, width='stretch')
 
 with tab2:
     st.subheader("Token Usage Over Time")
@@ -309,7 +364,7 @@ with tab2:
         hovermode='x unified'
     )
     
-    st.plotly_chart(fig_ts, use_container_width=True)
+    st.plotly_chart(fig_ts, width='stretch')
 
 with tab3:
     st.subheader("Raw Data Table")
@@ -321,7 +376,7 @@ with tab3:
     
     display_df = display_df.sort_values('timestamp', ascending=False)
     
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df, width='stretch')
     
     # Download button
     csv = display_df.to_csv(index=False)

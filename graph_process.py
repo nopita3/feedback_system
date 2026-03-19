@@ -65,7 +65,7 @@ if __name__ == "__main__":
         else:
             graph = graph_process(pdf_ollama, extracted_ollama, conditional_edges_ollama)
 
-        final_state = graph.invoke({"pdf_path": pdf_file_path, 
+        final_state: OverallState = graph.invoke({"pdf_path": pdf_file_path, 
                                     "student_test_path": student_test_path,
                                     "key_answer": [],
                                     "ocr_results": [], },
@@ -91,6 +91,10 @@ if __name__ == "__main__":
         
         # Save feedback as CSV
         feedback_table.to_csv(f"output_feedback_{api_model}_results.csv", index=False, encoding="utf-8")
+    
+
+        with open(f"output_{api_model}_results.txt", "w", encoding="utf-8") as f:
+            f.write(str(final_state))
 
     except Exception as e:
         print(f"An error occurred: {e}")
