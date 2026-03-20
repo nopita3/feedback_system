@@ -8,15 +8,17 @@ import json
 from datetime import datetime
 from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
-
+from io import BytesIO
 from Schemes.schema import OverallState, PageState, OCRResult
 from config import get_gemini_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
-    doc = fitz.open(state["pdf_path"])
-    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
+    # doc = fitz.open(state["pdf_path"])
+    doc = fitz.open(stream=BytesIO(state["pdf_path"]), filetype='pdf')
+    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
+    # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
     key_list = [ {col: df.loc[0, col]} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
     pages_list = []
     

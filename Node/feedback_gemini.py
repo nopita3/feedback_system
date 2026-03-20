@@ -5,11 +5,14 @@ from fcntl import flock, LOCK_EX, LOCK_UN
 from langchain_core.messages import HumanMessage , SystemMessage
 from langgraph.constants import Send
 import json
+from io import BytesIO
 from config import get_gemini_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
 
 def extract_student_information(state: OverallState):
-    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    
+    # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
     point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
     answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
     

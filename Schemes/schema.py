@@ -31,10 +31,11 @@ class PageState(TypedDict):
 
 # กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
 class OverallState(TypedDict):
-    pdf_path: Path
+    pdf_path: bytes
+    # pdf_path: Path
     pages: List[str]
-
-    student_test_path: Path
+    student_test_path: bytes
+    # student_test_path: Path
     key_answer: List[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
     student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
 
