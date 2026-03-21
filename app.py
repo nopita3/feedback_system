@@ -1,18 +1,11 @@
-"""
-🎓 AI-Powered Student Feedback System
-วปรับปรุง UI/UX - ทำให้ใช้งานง่ายและสวยงาม
-"""
-
 import gradio as gr
 import pandas as pd
 import json
 from pathlib import Path
 from time import perf_counter
 import tempfile
-from io import BytesIO
-import fitz
-
-from Schemes.schema import OverallState
+import concurrent.futures
+import time
 from Node import OCR_gemini, feedback_gemini
 from graph_process import graph_process
 
@@ -28,34 +21,20 @@ feedback_gemini_node = feedback_gemini.process_feedback
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "feedback_system_outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-
-def process_with_progress(pdf_file, csv_file, progress: gr.Progress = gr.Progress()):
-    """Process files with progress tracking"""
+# ❌ ถอด gr.Progress ออกเพื่อไม่ให้เกิด Progress bar ซ้ำซ้อน
+def process_with_progress(pdf_file, csv_file):
     try:
         if not pdf_file or not csv_file:
-            return "❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์", None
+            return "❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์", None, pd.DataFrame()
 
-        progress(0.1, desc="📖 กำลังอ่านไฟล์...")
-
-        # Read files as bytes
         with open(pdf_file, 'rb') as f:
             pdf_content = f.read()
         with open(csv_file, 'rb') as f:
             csv_content = f.read()
 
-        # Analyze files
-        pdf_stream = BytesIO(pdf_content)
-        doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        num_pages = len(doc)
-        df = pd.read_csv(BytesIO(csv_content))
-        num_students = len(df)
-
-        progress(0.15, desc=f"📊 พบ {num_pages} หน้า, {num_students} นักเรียน")
-
         start_time = perf_counter()
         api_model = "Gemini"
 
-        # Build and invoke graph
         graph = graph_process(
             pdf_gemini, extracted_gemini, conditional_edges_gemini,
             read_student_information, conditional_feedback_gemini, feedback_gemini_node
@@ -68,10 +47,7 @@ def process_with_progress(pdf_file, csv_file, progress: gr.Progress = gr.Progres
             "ocr_results": [],
         }
 
-        progress(0.25, desc="⚙️ เริ่มประมวลผล...")
         final_state = graph.invoke(initial_state, config={"max_concurrency": 2})
-
-        progress(0.85, desc="💾 บันทึกผลลัพธ์...")
 
         ocr_results = final_state.get("ocr_results", [])
         ocr_results_dicts = [
@@ -92,166 +68,241 @@ def process_with_progress(pdf_file, csv_file, progress: gr.Progress = gr.Progres
         with open(output_json_path, "w", encoding="utf-8") as f:
             json.dump(ocr_results_dicts, f, ensure_ascii=False, indent=2)
 
-        progress(1.0, desc="✅ เสร็จสิ้น!")
-
         end_time = perf_counter()
         processing_time = end_time - start_time
 
-        # Create summary
-        summary = f"""
-        ✅ **ประมวลผลสำเร็จ!**
-        
-        📊 **ผลสรุป:**
-        • หน้าข้อสอบ: {num_pages}
-        • จำนวนนักเรียน: {len(feedback_dicts)}
-        • ข้อสอบที่ OCR: {len(ocr_results_dicts)}
-        • ระยะเวลา: {processing_time:.1f} วินาที
-        
-        💾 **ไฟล์บันทึก:**
-        - CSV Feedback: `output_feedback_Gemini_results.csv`
-        - JSON OCR: `output_Aggregate_Gemini_results.json`
-        """
-
-        return summary, str(output_csv_path)
+        summary = f"✅ ประมวลผลสำเร็จใน {processing_time:.1f} วินาที"
+        return summary, str(output_csv_path), feedback_table
 
     except Exception as e:
-        error_msg = f"❌ เกิดข้อผิดพลาด: {str(e)}"
-        return error_msg, None
+        error_msg = f"❌ เกิดข้อผิดพลาดระหว่างประมวลผล: {str(e)}"
+        # ส่ง DataFrame สรุป Error คืนไปเพื่อให้หน้าจอไม่ค้าง
+        return error_msg, None, pd.DataFrame([{"Status": "Error", "Message": error_msg}])
 
 
 def create_ui():
-    """Create modern, user-friendly interface"""
-    
     with gr.Blocks(
-        title="📊 ระบบประเมินผลนักเรียน",
-        theme=gr.themes.Soft(),
+        title="Feedback System",
+        theme=gr.themes.Soft(
+            primary_hue="indigo",
+            secondary_hue="blue",
+            neutral_hue="slate"
+        ),
         css="""
+        .main-window {
+            background-color: #ffffff;
+            border-radius: 16px;
+            max-width: 750px;
+            margin: 40px auto;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+            border: 1px solid #f1f5f9;
+        }
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 40px 20px;
-            border-radius: 12px;
+            background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 32px;
+            font-weight: 800;
+            text-align: center;
+            padding: 10px;
             margin-bottom: 30px;
-            text-align: center;
+            letter-spacing: -0.5px;
         }
-        .header h1 { color: white; margin: 0; }
-        .step-box {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 12px;
-            border-left: 4px solid #667eea;
-            margin-bottom: 20px;
+        .btn-start {
+            background: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 12px !important;
+            font-weight: 600 !important;
+            padding: 14px 28px !important;
+            transition: all 0.2s ease !important;
+            width: 60% !important;
+            margin: 10px auto !important;
+            display: block !important;
+            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3) !important;
         }
-        .result-box {
-            background: #f0f7ff;
-            padding: 20px;
-            border-radius: 12px;
-            border: 2px solid #667eea;
+        .btn-start:hover {
+            transform: translateY(-2px) !important;
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4) !important;
         }
-        .success-box {
-            background: #f0fdf4;
-            padding: 20px;
-            border-radius: 12px;
-            border: 2px solid #10b981;
+        .btn-download {
+            background: #10b981 !important;
+            color: white !important;
+            font-weight: 600 !important;
+            border: none !important;
+            border-radius: 8px !important;
+            transition: background 0.2s ease !important;
         }
-        .file-box {
-            background: white;
-            padding: 20px;
-            border: 2px dashed #ccc;
-            border-radius: 12px;
-            text-align: center;
+        .btn-download:hover {
+            background: #059669 !important;
+        }
+        .filename-box {
+            border: 1px solid #e2e8f0 !important;
+            background: #f8fafc !important;
+            border-radius: 8px !important;
+            color: #475569 !important;
+        }
+        /* Custom file upload styling */
+        .svelte-11zloen {
+            border-radius: 12px !important;
+            border: 2px dashed #cbd5e1 !important;
+            transition: all 0.2s ease;
+        }
+        .svelte-11zloen:hover {
+            border-color: #6366f1 !important;
+            background-color: #f8fafc !important;
         }
         """
     ) as demo:
+        with gr.Column(elem_classes="main-window"):
+            gr.HTML("<div class='header'>Feedback System</div>")
 
-        # Header
-        gr.HTML("""
-        <div class="header">
-            <h1>📊 ระบบประเมินผลนักเรียน AI</h1>
-            <p style="margin: 10px 0 0 0; font-size: 16px;">อ่านข้อสอบ OCR และสร้าง Feedback อัตโนมัติ</p>
-        </div>
-        """)
+            # ---------------- State 1: อัปโหลดและปุ่มเริ่ม ----------------
+            with gr.Group() as input_group:
+                with gr.Row():
+                    pdf_file = gr.File(label="Upload Exam File.pdf", file_types=[".pdf"], type="filepath")
+                with gr.Row():
+                    csv_file = gr.File(label="Upload student File.csv", file_types=[".csv"], type="filepath")
+                with gr.Row():
+                    start_btn = gr.Button("Start Generate", elem_classes="btn-start")
 
-        # Main content
-        with gr.Row():
-            with gr.Column(scale=1):
-                gr.Markdown("## 📁 ขั้นตอนที่ 1: อัปโหลด")
+            # ---------------- State 2 & 3: สถานะรอประมวลผลและผลลัพธ์ ----------------
+            with gr.Group(visible=False) as output_group:
+                file_info = gr.HTML()
                 
-                with gr.Group():
-                    pdf_file = gr.File(
-                        label="📄 ไฟล์ข้อสอบ (PDF)",
-                        file_types=[".pdf"],
-                        type="filepath"
-                    )
-
-                with gr.Group():
-                    csv_file = gr.File(
-                        label="📊 ไฟล์ข้อมูลนักเรียน (CSV)",
-                        file_types=[".csv"],
-                        type="filepath"
-                    )
-
-            with gr.Column(scale=1):
-                gr.Markdown("## ⚙️ ขั้นตอนที่ 2: ประมวลผล")
+                gr.HTML("<div style='margin-top: 15px; font-size: 14px;'>Progression bar...</div>")
+                progress_html = gr.HTML()
                 
-                process_btn = gr.Button(
-                    "🚀 เริ่มประมวลผล",
-                    variant="primary",
-                    size="lg",
-                    scale=1
+                status_box = gr.HTML()
+                
+                result_table = gr.Dataframe(interactive=False, visible=False)
+                
+                # --- แก้ไขส่วนปุ่ม Download ให้ตรงกับ Design ---
+                with gr.Row(visible=False) as download_row:
+                    gr.Textbox(value="Feedback_output.csv", show_label=False, interactive=False, scale=3, elem_classes="filename-box")
+                    download_btn = gr.DownloadButton("download", value=None, scale=1, elem_classes="btn-download")
+
+        # ---------------- Logic การเปลี่ยนสถานะ ----------------
+        def handle_process(pdf, csv):
+            if not pdf or not csv:
+                yield (
+                    gr.update(), gr.update(), gr.update(), gr.update(),
+                    "<div style='color: red; text-align: center; padding: 20px;'>❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์</div>",
+                    gr.update(), gr.update(), gr.update(), gr.update()
+                )
+                return
+
+            pdf_name = Path(pdf).name
+            csv_name = Path(csv).name
+            
+            files_html = f"""
+            <div style='display: flex; gap: 15px; justify-content: center; margin-bottom: 20px;'>
+                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155; font-weight: 500; box-shadow: 0 2px 4px rgba(0,0,0,0.02);'>
+                    <span style='font-size:14px;'>📄 {pdf_name}</span>
+                </div>
+                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155; font-weight: 500; box-shadow: 0 2px 4px rgba(0,0,0,0.02);'>
+                    <span style='font-size:14px;'>📊 {csv_name}</span>
+                </div>
+            </div>
+            """
+            
+            prog_25 = """
+            <div style='display: flex; align-items: center; gap: 15px;'>
+                <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
+                    <div style='width: 25%; background: linear-gradient(90deg, #6366f1, #a855f7); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
+                </div>
+                <span style='font-size: 14px; font-weight: 600; color: #64748b;'>25%</span>
+            </div>
+            """
+
+            # 1. เปลี่ยนหน้าเริ่มต้น
+            yield (
+                gr.update(visible=False), # input_group
+                gr.update(visible=True),  # output_group
+                files_html,               # file_info
+                prog_25,                  # progress_html (will be updated)
+                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b; background: #f8fafc;'><span style='display:inline-block; animation: pulse 2s infinite;'>⏳ Analyzing and generating feedback...</span></div>", # status_box
+                gr.update(visible=False), # result_table
+                gr.update(visible=False), # download_row
+                gr.update(value=None),    # download_btn
+                gr.update(interactive=False) # start_btn 
+            )
+
+            # ประมวลผลจริงโดยใช้ ThreadPoolExecutor เพื่ออัปเดตแกน Progress 1% ต่อวินาที
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(process_with_progress, pdf, csv)
+                
+                progress = 1
+                while not future.done():
+                    if progress < 99:
+                        progress += 1
+                        
+                    prog_html = f"""
+                    <div style='display: flex; align-items: center; gap: 15px;'>
+                        <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
+                            <div style='width: {progress}%; background: linear-gradient(90deg, #6366f1, #a855f7); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
+                        </div>
+                        <span style='font-size: 14px; font-weight: 600; color: #64748b;'>{progress}%</span>
+                    </div>
+                    """
+                    
+                    yield (
+                        gr.update(), gr.update(), gr.update(),
+                        prog_html,
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                    )
+                    time.sleep(1)
+                
+                # เมื่อเสร็จสิ้น นำผลลัพธ์ออกมา
+                summary, csv_path, result_df = future.result()
+
+            prog_100 = """
+            <div style='display: flex; align-items: center; gap: 15px;'>
+                <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
+                    <div style='width: 100%; background: linear-gradient(90deg, #10b981, #059669); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
+                </div>
+                <span style='font-size: 14px; font-weight: 600; color: #10b981;'>100%</span>
+            </div>
+            """
+            
+            status_done = "<div style='text-align: center; padding: 40px; border: 1px dashed #10b981; border-radius: 12px; margin-top: 20px; font-size: 18px; color: #10b981; font-weight: bold; background: #ecfdf5;'>✅ Feedback Generated Done</div>"
+
+            # 2. แสดงผล 100% 
+            if csv_path is None:
+                # กรณี Error
+                yield (
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    files_html,
+                    prog_100,
+                    f"<div style='color: #ef4444; text-align: center; padding: 20px; border: 1px solid #f87171; border-radius: 12px; border-radius: 12px; margin-top: 20px; background: #fef2f2; font-weight: 500;'>{summary}</div>",
+                    gr.update(visible=True, value=result_df),
+                    gr.update(visible=False),
+                    gr.update(value=None),
+                    gr.update(interactive=True)
+                )
+            else:
+                # กรณีสำเร็จ แสดงผลตาราง และแสดงปุ่ม Download ที่พร้อมโหลดไฟล์
+                yield (
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    files_html,
+                    prog_100,
+                    status_done,
+                    gr.update(visible=True, value=result_df),
+                    gr.update(visible=True),            # เปิดให้เห็นแถวปุ่มดาวน์โหลด
+                    gr.update(value=csv_path),          # ยัดไฟล์ CSV ใส่เข้าไปในปุ่ม
+                    gr.update(interactive=True)
                 )
 
-                gr.Markdown("## 📊 ความคืบหน้า")
-                progress_bar = gr.Progress(track_tqdm=False)
-
-        # Results section
-        gr.Markdown("---")
-        gr.Markdown("## 📋 ผลลัพธ์")
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                status_display = gr.Markdown(
-                    value="⏳ พร้อมประมวลผล...",
-                )
-
-            with gr.Column(scale=1):
-                download_btn = gr.File(
-                    label="📥 ดาวน์โหลด CSV",
-                    interactive=False
-                )
-
-        # Info section (collapsible)
-        with gr.Accordion("📖 คำแนะนำและข้อกำหนด", open=False):
-            gr.Markdown("""
-            ### ✅ ข้อกำหนดไฟล์ CSV
-            
-            ไฟล์ CSV ต้องมีคอลัมน์ต่อไปนี้:
-            - `StudentID` - รหัสนักเรียน
-            - `Earned Points` - คะแนนรวม
-            - `Stu1, Stu2, ...` - คำตอบที่เลือก
-            - `Points1, Points2, ...` - คะแนนแต่ละข้อ
-            - `PriKey1, PriKey2, ...` - คำตอบที่ถูกต้อง
-            
-            ### ⏱️ ระยะเวลาประมวลผล
-            - 10 หน้า + 5 นักเรียน = ~3-5 นาที
-            
-            ### 📊 ผลลัพธ์
-            - CSV: Feedback สำหรับแต่ละนักเรียน
-            - JSON: ผลการ OCR (บันทึกในเซิร์ฟเวอร์)
-            """)
-
-        # Event handler
-        def handle_process(pdf, csv, progress=gr.Progress()):
-            return process_with_progress(pdf, csv, progress)
-
-        process_btn.click(
+        start_btn.click(
             fn=handle_process,
             inputs=[pdf_file, csv_file],
-            outputs=[status_display, download_btn]
+            outputs=[input_group, output_group, file_info, progress_html, status_box, result_table, download_row, download_btn, start_btn]
         )
 
     return demo
-
 
 if __name__ == "__main__":
     demo = create_ui()
