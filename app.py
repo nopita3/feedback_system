@@ -1,4 +1,4 @@
-import gradio as gr
+
 import pandas as pd
 import json
 from pathlib import Path
@@ -6,6 +6,11 @@ from time import perf_counter
 import tempfile
 import concurrent.futures
 import time
+import uuid
+import gradio as gr
+
+from langgraph.checkpoint.memory import MemorySaver
+
 from Node import OCR_gemini, feedback_gemini
 from graph_process import graph_process
 
@@ -21,24 +26,30 @@ feedback_gemini_node = feedback_gemini.process_feedback
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "feedback_system_outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# ❌ ถอด gr.Progress ออกเพื่อไม่ให้เกิด Progress bar ซ้ำซ้อน
-def process_with_progress(pdf_file, csv_file):
+# Global graph instance with MemorySaver enabled to support interruption & resuming
+global_memory = MemorySaver()
+graph = graph_process(
+    pdf_gemini, extracted_gemini, conditional_edges_gemini,
+    read_student_information, conditional_feedback_gemini, feedback_gemini_node,
+    memory=global_memory
+)
+
+def run_ocr_process(pdf_file, csv_file, thread_id):
     try:
         if not pdf_file or not csv_file:
-            return "❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์", None, pd.DataFrame()
+            return False, "❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์"
 
         with open(pdf_file, 'rb') as f:
             pdf_content = f.read()
         with open(csv_file, 'rb') as f:
             csv_content = f.read()
 
-        start_time = perf_counter()
-        api_model = "Gemini"
+        with open(pdf_file, 'rb') as f:
+            pdf_content = f.read()
+        with open(csv_file, 'rb') as f:
+            csv_content = f.read()
 
-        graph = graph_process(
-            pdf_gemini, extracted_gemini, conditional_edges_gemini,
-            read_student_information, conditional_feedback_gemini, feedback_gemini_node
-        )
+        config = {"configurable": {"thread_id": thread_id}, "max_concurrency": 2}
 
         initial_state = {
             "pdf_path": pdf_content,
@@ -47,52 +58,139 @@ def process_with_progress(pdf_file, csv_file):
             "ocr_results": [],
         }
 
-        final_state = graph.invoke(initial_state, config={"max_concurrency": 2})
+        # Run the graph until the breakpoint (interrupt_before=["read_student_information"])
+        for event in graph.stream(initial_state, config=config):
+            pass
 
-        ocr_results = final_state.get("ocr_results", [])
+        state = graph.get_state(config)
+        ocr_results = state.values.get("ocr_results", [])
+        
         ocr_results_dicts = [
             item.model_dump() if hasattr(item, 'model_dump') else item
             for item in ocr_results
         ]
-        feedback_list = final_state.get("feedback", [])
+        
+        # Flatten the dictionary list into a DataFrame-friendly format for easy editing
+        df_list = []
+        for item in ocr_results_dicts:
+            skill_tags = ", ".join(item.get("skill_tags", [])) if isinstance(item.get("skill_tags"), list) else ""
+            
+            misconcepts = []
+            if isinstance(item.get("misconcept_type"), list):
+                for m in item.get("misconcept_type"):
+                    if isinstance(m, dict):
+                        for k, v in m.items():
+                            misconcepts.append(f"{k}: {v}")
+            misc_str = " | ".join(misconcepts)
+            
+            df_list.append({
+                "question_id": str(item.get("question_id", "")),
+                "question_content": str(item.get("question_content", "")),
+                "skill_tags": skill_tags,
+                "misconcept_type": misc_str,
+                "image_description": str(item.get("image_description", ""))
+            })
+            
+        return True, pd.DataFrame(df_list)
+
+    except Exception as e:
+        return False, f"❌ เกิดข้อผิดพลาดระหว่าง OCR: {str(e)}"
+
+def run_feedback_process(edited_df, thread_id):
+    try:
+        # Reconstruct the expected list of OCR dicts from the user's DataFrame edits
+        edited_ocr_results = []
+        for _, row in edited_df.iterrows():
+            # Parse skill tags back to list
+            tags_str = str(row.get("skill_tags", ""))
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+            
+            # Parse misconcept_type back to list of dicts
+            misc_str = str(row.get("misconcept_type", ""))
+            misc_list = []
+            for part in misc_str.split("|"):
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    misc_list.append({k.strip(): v.strip()})
+                    
+            edited_ocr_results.append({
+                "question_id": str(row.get("question_id", "")),
+                "question_content": str(row.get("question_content", "")),
+                "skill_tags": tags,
+                "misconcept_type": misc_list,
+                "image_description": str(row.get("image_description", ""))
+            })
+
+        config = {"configurable": {"thread_id": thread_id}, "max_concurrency": 2}
+        
+        # Set the user corrections as state, pretending it came from OCR processing node
+        graph.update_state(config, {"ocr_user_corrections": edited_ocr_results}, as_node="process_ocr_page")
+        
+        start_time = perf_counter()
+        
+        # Resume the graph from the point it was interrupted
+        for event in graph.stream(None, config=config):
+            pass
+            
+        final_state_values = graph.get_state(config).values
+        end_time = perf_counter()
+        processing_time = end_time - start_time
+        
+        # Process and save outcomes
+        saved_ocr = final_state_values.get("ocr_user_corrections") if final_state_values.get("ocr_user_corrections") else final_state_values.get("ocr_results", [])
+        ocr_results_dicts = [item.model_dump() if hasattr(item, 'model_dump') else item for item in saved_ocr]
+        
+        feedback_list = final_state_values.get("feedback", [])
         feedback_dicts = [
             fb.model_dump() if hasattr(fb, 'model_dump') else fb
             for fb in feedback_list
         ]
 
         feedback_table = pd.DataFrame(feedback_dicts)
-        output_csv_path = OUTPUT_DIR / f"output_feedback_{api_model}_results.csv"
-        output_json_path = OUTPUT_DIR / f"output_Aggregate_{api_model}_results.json"
+        api_model = "Gemini"
+        
+        output_csv_path = OUTPUT_DIR / f"output_feedback_{api_model}_results_{thread_id}.csv"
+        output_json_path = OUTPUT_DIR / f"output_Aggregate_{api_model}_results_{thread_id}.json"
 
         feedback_table.to_csv(output_csv_path, index=False, encoding="utf-8")
         with open(output_json_path, "w", encoding="utf-8") as f:
             json.dump(ocr_results_dicts, f, ensure_ascii=False, indent=2)
 
-        end_time = perf_counter()
-        processing_time = end_time - start_time
-
         summary = f"✅ ประมวลผลสำเร็จใน {processing_time:.1f} วินาที"
-        return summary, str(output_csv_path), feedback_table
+        return True, summary, str(output_csv_path), feedback_table
 
     except Exception as e:
-        error_msg = f"❌ เกิดข้อผิดพลาดระหว่างประมวลผล: {str(e)}"
-        # ส่ง DataFrame สรุป Error คืนไปเพื่อให้หน้าจอไม่ค้าง
-        return error_msg, None, pd.DataFrame([{"Status": "Error", "Message": error_msg}])
+        return False, f"❌ เกิดข้อผิดพลาดระหว่างสร้าง Feedback: {str(e)}", None, pd.DataFrame([{"Status": "Error"}])
 
+def get_progress_html(percentage, color="indigo"):
+    if color == "indigo":
+        bg = "linear-gradient(90deg, #6366f1, #a855f7)"
+        txt_color = "#64748b"
+    elif color == "green":
+        bg = "linear-gradient(90deg, #10b981, #059669)"
+        txt_color = "#10b981"
+    else:
+        bg = "linear-gradient(90deg, #ef4444, #dc2626)"
+        txt_color = "#ef4444"
+        
+    return f"""
+    <div style='display: flex; align-items: center; gap: 15px;'>
+        <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
+            <div style='width: {percentage}%; background: {bg}; height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
+        </div>
+        <span style='font-size: 14px; font-weight: 600; color: {txt_color};'>{percentage}%</span>
+    </div>
+    """
 
 def create_ui():
     with gr.Blocks(
         title="Feedback System",
-        theme=gr.themes.Soft(
-            primary_hue="indigo",
-            secondary_hue="blue",
-            neutral_hue="slate"
-        ),
+        theme=gr.themes.Soft(primary_hue="indigo", secondary_hue="blue", neutral_hue="slate"),
         css="""
         .main-window {
             background-color: #ffffff;
             border-radius: 16px;
-            max-width: 750px;
+            max-width: 850px;
             margin: 40px auto;
             padding: 30px;
             box-shadow: 0 10px 40px rgba(0,0,0,0.08);
@@ -107,7 +205,6 @@ def create_ui():
             text-align: center;
             padding: 10px;
             margin-bottom: 30px;
-            letter-spacing: -0.5px;
         }
         .btn-start {
             background: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
@@ -122,74 +219,59 @@ def create_ui():
             display: block !important;
             box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3) !important;
         }
-        .btn-start:hover {
-            transform: translateY(-2px) !important;
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4) !important;
-        }
-        .btn-download {
-            background: #10b981 !important;
-            color: white !important;
-            font-weight: 600 !important;
-            border: none !important;
-            border-radius: 8px !important;
-            transition: background 0.2s ease !important;
-        }
-        .btn-download:hover {
-            background: #059669 !important;
-        }
-        .filename-box {
-            border: 1px solid #e2e8f0 !important;
-            background: #f8fafc !important;
-            border-radius: 8px !important;
-            color: #475569 !important;
-        }
-        /* Custom file upload styling */
-        .svelte-11zloen {
-            border-radius: 12px !important;
-            border: 2px dashed #cbd5e1 !important;
-            transition: all 0.2s ease;
-        }
-        .svelte-11zloen:hover {
-            border-color: #6366f1 !important;
-            background-color: #f8fafc !important;
-        }
+        .btn-start:hover { transform: translateY(-2px) !important; box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4) !important; }
+        .btn-download { background: #10b981 !important; color: white !important; font-weight: 600 !important; border-radius: 8px !important; }
+        .btn-download:hover { background: #059669 !important; }
         """
     ) as demo:
+        session_id = gr.State(lambda: str(uuid.uuid4()))
+
         with gr.Column(elem_classes="main-window"):
             gr.HTML("<div class='header'>Feedback System</div>")
 
-            # ---------------- State 1: อัปโหลดและปุ่มเริ่ม ----------------
+            # --- State 1: Input group ---
             with gr.Group() as input_group:
                 with gr.Row():
                     pdf_file = gr.File(label="Upload Exam File.pdf", file_types=[".pdf"], type="filepath")
                 with gr.Row():
                     csv_file = gr.File(label="Upload student File.csv", file_types=[".csv"], type="filepath")
                 with gr.Row():
-                    start_btn = gr.Button("Start Generate", elem_classes="btn-start")
+                    start_ocr_btn = gr.Button("Start Extracting OCR", elem_classes="btn-start")
 
-            # ---------------- State 2 & 3: สถานะรอประมวลผลและผลลัพธ์ ----------------
-            with gr.Group(visible=False) as output_group:
+            # --- Intermediate Processing View (Shared) ---
+            with gr.Group(visible=False) as processing_group:
                 file_info = gr.HTML()
-                
-                gr.HTML("<div style='margin-top: 15px; font-size: 14px;'>Progression bar...</div>")
+                gr.HTML("<div style='margin-top: 15px; font-size: 14px;'>Progression...</div>")
                 progress_html = gr.HTML()
-                
                 status_box = gr.HTML()
-                
-                result_table = gr.Dataframe(interactive=False, visible=False)
-                
-                # --- แก้ไขส่วนปุ่ม Download ให้ตรงกับ Design ---
+
+            # --- State 2: OCR Review Group ---
+            with gr.Group(visible=False) as ocr_review_group:
+                gr.HTML("<h3 style='text-align: center; color: #4f46e5;'>✅ OCR Extracted. Review and Correct Data Below</h3>")
+                ocr_edit_df = gr.Dataframe(
+                    label="OCR Results (Edit in Table)",
+                    interactive=True,
+                    wrap=True,
+                    headers=["question_id", "question_content", "skill_tags", "misconcept_type", "image_description"],
+                    datatype=["str", "str", "str", "str", "str"]
+                )
+                confirm_feedback_btn = gr.Button("Confirm & Generate Feedback", elem_classes="btn-start")
+
+            # --- State 3: Output Group ---
+            with gr.Group(visible=False) as result_group:
+                result_table = gr.Dataframe(interactive=False, visible=True)
                 with gr.Row(visible=False) as download_row:
                     gr.Textbox(value="Feedback_output.csv", show_label=False, interactive=False, scale=3, elem_classes="filename-box")
-                    download_btn = gr.DownloadButton("download", value=None, scale=1, elem_classes="btn-download")
+                    download_btn = gr.DownloadButton("Download CSV", value=None, scale=1, elem_classes="btn-download")
 
-        # ---------------- Logic การเปลี่ยนสถานะ ----------------
-        def handle_process(pdf, csv):
+
+        # Handlers
+        def handle_start_ocr(pdf, csv, s_id):
             if not pdf or not csv:
                 yield (
-                    gr.update(), gr.update(), gr.update(), gr.update(),
+                    gr.update(), gr.update(visible=True), gr.update(), gr.update(),
                     "<div style='color: red; text-align: center; padding: 20px;'>❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์</div>",
-                    gr.update(), gr.update(), gr.update(), gr.update()
+                    gr.update(), gr.update(), gr.update()
                 )
                 return
 
@@ -198,117 +280,137 @@ def create_ui():
             
             files_html = f"""
             <div style='display: flex; gap: 15px; justify-content: center; margin-bottom: 20px;'>
-                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155; font-weight: 500; box-shadow: 0 2px 4px rgba(0,0,0,0.02);'>
-                    <span style='font-size:14px;'>📄 {pdf_name}</span>
+                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155;'>
+                    <span>📄 {pdf_name}</span>
                 </div>
-                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155; font-weight: 500; box-shadow: 0 2px 4px rgba(0,0,0,0.02);'>
-                    <span style='font-size:14px;'>📊 {csv_name}</span>
+                <div style='border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 16px; display: flex; align-items: center; gap: 10px; background: #f8fafc; color: #334155;'>
+                    <span>📊 {csv_name}</span>
                 </div>
-            </div>
-            """
-            
-            prog_25 = """
-            <div style='display: flex; align-items: center; gap: 15px;'>
-                <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
-                    <div style='width: 25%; background: linear-gradient(90deg, #6366f1, #a855f7); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
-                </div>
-                <span style='font-size: 14px; font-weight: 600; color: #64748b;'>25%</span>
             </div>
             """
 
-            # 1. เปลี่ยนหน้าเริ่มต้น
+            # Show processing
             yield (
                 gr.update(visible=False), # input_group
-                gr.update(visible=True),  # output_group
+                gr.update(visible=True),  # processing_group
                 files_html,               # file_info
-                prog_25,                  # progress_html (will be updated)
-                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b; background: #f8fafc;'><span style='display:inline-block; animation: pulse 2s infinite;'>⏳ Analyzing and generating feedback...</span></div>", # status_box
-                gr.update(visible=False), # result_table
-                gr.update(visible=False), # download_row
-                gr.update(value=None),    # download_btn
-                gr.update(interactive=False) # start_btn 
+                get_progress_html(10),    # progress_html
+                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ Extracting document layout & text via OCR...</span></div>",
+                gr.update(visible=False), # ocr_review_group
+                gr.update(),              # ocr_edit_df
+                gr.update(visible=True, interactive=True) # confirm_feedback_btn
             )
 
-            # ประมวลผลจริงโดยใช้ ThreadPoolExecutor เพื่ออัปเดตแกน Progress 1% ต่อวินาที
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(process_with_progress, pdf, csv)
-                
-                progress = 1
+                future = executor.submit(run_ocr_process, pdf, csv, s_id)
+                progress = 10
                 while not future.done():
-                    if progress < 99:
-                        progress += 1
-                        
-                    prog_html = f"""
-                    <div style='display: flex; align-items: center; gap: 15px;'>
-                        <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
-                            <div style='width: {progress}%; background: linear-gradient(90deg, #6366f1, #a855f7); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
-                        </div>
-                        <span style='font-size: 14px; font-weight: 600; color: #64748b;'>{progress}%</span>
-                    </div>
-                    """
-                    
+                    if progress < 50:
+                        progress += 2
                     yield (
                         gr.update(), gr.update(), gr.update(),
-                        prog_html,
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+                        get_progress_html(progress),
+                        gr.update(), gr.update(), gr.update(), gr.update()
                     )
                     time.sleep(1)
                 
-                # เมื่อเสร็จสิ้น นำผลลัพธ์ออกมา
-                summary, csv_path, result_df = future.result()
+                success, result = future.result()
 
-            prog_100 = """
-            <div style='display: flex; align-items: center; gap: 15px;'>
-                <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
-                    <div style='width: 100%; background: linear-gradient(90deg, #10b981, #059669); height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
-                </div>
-                <span style='font-size: 14px; font-weight: 600; color: #10b981;'>100%</span>
-            </div>
-            """
-            
-            status_done = "<div style='text-align: center; padding: 40px; border: 1px dashed #10b981; border-radius: 12px; margin-top: 20px; font-size: 18px; color: #10b981; font-weight: bold; background: #ecfdf5;'>✅ Feedback Generated Done</div>"
-
-            # 2. แสดงผล 100% 
-            if csv_path is None:
-                # กรณี Error
+            if success:
+                # Finished OCR, switch to Review state
                 yield (
-                    gr.update(visible=False),
-                    gr.update(visible=True),
-                    files_html,
-                    prog_100,
-                    f"<div style='color: #ef4444; text-align: center; padding: 20px; border: 1px solid #f87171; border-radius: 12px; border-radius: 12px; margin-top: 20px; background: #fef2f2; font-weight: 500;'>{summary}</div>",
-                    gr.update(visible=True, value=result_df),
-                    gr.update(visible=False),
-                    gr.update(value=None),
-                    gr.update(interactive=True)
+                    gr.update(), 
+                    gr.update(visible=False), 
+                    gr.update(), gr.update(), gr.update(),
+                    gr.update(visible=True), 
+                    gr.update(value=result),
+                    gr.update(visible=True, interactive=True, value="Confirm & Generate Feedback")
                 )
             else:
-                # กรณีสำเร็จ แสดงผลตาราง และแสดงปุ่ม Download ที่พร้อมโหลดไฟล์
                 yield (
-                    gr.update(visible=False),
-                    gr.update(visible=True),
-                    files_html,
-                    prog_100,
-                    status_done,
-                    gr.update(visible=True, value=result_df),
-                    gr.update(visible=True),            # เปิดให้เห็นแถวปุ่มดาวน์โหลด
-                    gr.update(value=csv_path),          # ยัดไฟล์ CSV ใส่เข้าไปในปุ่ม
-                    gr.update(interactive=True)
+                    gr.update(), 
+                    gr.update(visible=True), 
+                    gr.update(), 
+                    get_progress_html(100, color="red"),
+                    f"<div style='color: red; text-align: center; padding: 20px;'>{result}</div>",
+                    gr.update(), 
+                    gr.update(),
+                    gr.update()
                 )
 
-        start_btn.click(
-            fn=handle_process,
-            inputs=[pdf_file, csv_file],
-            outputs=[input_group, output_group, file_info, progress_html, status_box, result_table, download_row, download_btn, start_btn]
+        start_ocr_btn.click(
+            fn=handle_start_ocr,
+            inputs=[pdf_file, csv_file, session_id],
+            outputs=[input_group, processing_group, file_info, progress_html, status_box, ocr_review_group, ocr_edit_df, confirm_feedback_btn]
+        )
+
+
+        def handle_confirm_feedback(edited_df, s_id):
+            # Back to processing UI
+            yield (
+                gr.update(visible=False), # ocr_review_group
+                gr.update(visible=True),  # processing_group
+                get_progress_html(50),    # progress_html
+                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ Analyzing answers and generating feedback...</span></div>",
+                gr.update(visible=False), # result_group
+                gr.update(),              # result_table
+                gr.update(),              # download_row
+                gr.update(),              # download_btn
+                gr.update(interactive=False, value="⏳ Processing...") # confirm_feedback_btn
+            )
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_feedback_process, edited_df, s_id)
+                progress = 50
+                while not future.done():
+                    if progress < 99:
+                        progress += 1
+                    yield (
+                        gr.update(), gr.update(),
+                        get_progress_html(progress),
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update()
+                    )
+                    time.sleep(1)
+                
+                success, summary, csv_path, df = future.result()
+
+            if success:
+                status_done = f"<div style='text-align: center; padding: 20px; border: 1px solid #10b981; border-radius: 12px; margin-top: 20px; font-size: 16px; color: #10b981; background: #ecfdf5;'>{summary}</div>"
+                yield (
+                    gr.update(), 
+                    gr.update(visible=True), 
+                    get_progress_html(100, color="green"),
+                    status_done,
+                    gr.update(visible=True),
+                    gr.update(value=df), 
+                    gr.update(visible=True), 
+                    gr.update(value=csv_path),
+                    gr.update(interactive=False, value="✅ Complete")
+                )
+            else:
+                yield (
+                    gr.update(visible=True), 
+                    gr.update(visible=True), 
+                    get_progress_html(100, color="red"),
+                    f"<div style='color: red; text-align: center;'>{summary}</div>",
+                    gr.update(visible=True),
+                    gr.update(value=pd.DataFrame()),
+                    gr.update(visible=False), 
+                    gr.update(),
+                    gr.update(visible=True, interactive=True, value="Confirm & Generate Feedback")
+                )
+
+
+        confirm_feedback_btn.click(
+            fn=handle_confirm_feedback,
+            inputs=[ocr_edit_df, session_id],
+            outputs=[ocr_review_group, processing_group, progress_html, status_box, result_group, result_table, download_row, download_btn, confirm_feedback_btn]
         )
 
     return demo
 
 if __name__ == "__main__":
     demo = create_ui()
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True
-    )
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, show_error=True)
+

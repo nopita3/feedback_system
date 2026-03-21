@@ -1,18 +1,19 @@
 from datetime import datetime
+from io import BytesIO
 from time import perf_counter
 import pandas as pd
 from fcntl import flock, LOCK_EX, LOCK_UN
 from langchain_core.messages import HumanMessage , SystemMessage
 from langgraph.constants import Send
 import json
-from io import BytesIO
 from config import get_gemini_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
 
 def extract_student_information(state: OverallState):
-    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    
     
     # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
     point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
     answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
     
@@ -30,12 +31,18 @@ def extract_student_information(state: OverallState):
 
 def continue_to_feedback(state: OverallState):
     
-    return [Send("process_feedback", {"student_information": student, "ocr_results": state["ocr_results"]  }) 
+    # ใช้ ocr_user_corrections ถ้ายูสเซอร์มีการแก้ไขให้เอามาใช้แทน ถ้าไม่มีให้ใช้ ocr_results ต้นฉบับ
+    ocr_data = state.get("ocr_user_corrections") if state.get("ocr_user_corrections") else state["ocr_results"]
+    
+    return [Send("process_feedback", {"student_information": student, "ocr_user_corrections": ocr_data}) 
         for _, student in enumerate(state["student_information"])]
 
 
     
 def process_feedback(state: OverallState):
+
+
+
     student = state['student_information']
     llm, callback = get_gemini_model(model="gemini-3.1-flash-lite-preview")
     percentage = student.Earned_points / len(student.point_per_question) * 100
@@ -60,9 +67,10 @@ def process_feedback(state: OverallState):
         6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
         7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
 
-        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_results"]}
+        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_user_corrections"] if state.get("ocr_user_corrections") else state["ocr_results"]}
     """)
-    
+
+
     human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {student.student_id} ได้รับคะแนนในแต่ละข้อดังนี้ {student.point_per_question}
         กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
     

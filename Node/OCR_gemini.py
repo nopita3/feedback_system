@@ -2,13 +2,13 @@ from langgraph.constants import Send
 from langchain_core.messages import HumanMessage
 
 import fitz  # PyMuPDF
+from io import BytesIO
 import pandas as pd
 import base64
 import json 
 from datetime import datetime
 from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
-from io import BytesIO
 from Schemes.schema import OverallState, PageState, OCRResult
 from config import get_gemini_model
 
@@ -16,10 +16,12 @@ from config import get_gemini_model
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
     # doc = fitz.open(state["pdf_path"])
-    doc = fitz.open(stream=BytesIO(state["pdf_path"]), filetype='pdf')
-    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
     # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
-    key_list = [ {col: df.loc[0, col]} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
+    doc = fitz.open(stream=state["pdf_path"], filetype="pdf")
+    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
+
+    # Convert numpy types to native Python types using str()
+    key_list = [ {col: str(df.loc[0, col])} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
     pages_list = []
     
     for page_num in range(len(doc)):
@@ -43,7 +45,6 @@ def continue_to_ocr(state: OverallState):
 
 # Node: ประมวลผลแต่ละหน้าแบบ Parallel โดยรับ State แบบเดี่ยว (PageState)
 def process_ocr_page(state: PageState):
-    print("process_ocr_page is running...")
     """
     Process individual PDF pages in parallel using OCR.
     

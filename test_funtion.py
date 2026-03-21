@@ -1,285 +1,125 @@
-from datetime import datetime
+from langgraph.checkpoint.memory import MemorySaver
+
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated
 import pandas as pd
-from langchain_ollama import ChatOllama
-from fcntl import flock, LOCK_EX, LOCK_UN
-from langgraph.graph import StateGraph, START, END
-from langgraph.constants import Send
-import operator
-from pydantic import BaseModel, Field
-from langchain_core.messages import HumanMessage , SystemMessage
 import json
-from config import get_gemini_model
 
-data = pd.read_csv(Path("Documents/Intensive_Physics_4.csv"))
+from graph_process import graph_process
+from Node import OCR_gemini
+from Node import OCR_ollama
+from Node import feedback_gemini
 
-answer_col_list = [ col for col in data.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
-point_col_list = [ col for col in data.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
-key_list = [{col: data.loc[0,col]} for col in data.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
+pdf_gemini = OCR_gemini.read_and_split_pdf
+pdf_ollama = OCR_ollama.read_and_split_pdf
 
+extracted_ollama = OCR_ollama.process_ocr_page
+extracted_gemini = OCR_gemini.process_ocr_page
 
-data_complete = data[["StudentID", 'Earned Points'] + answer_col_list + point_col_list]
-data_complete["StudentID"] = data_complete["StudentID"].astype(str)
-
-sample = data_complete.sample(10, random_state=42)
-test_json = json.load(open("output_Aggregate_Gemini_results.json", "r"))
-
-class Student(BaseModel):
-    student_id: str = Field( description="รหัสประจำตัวนักเรียน")
-    Earned_points: int = Field( description="คะแนนรวมที่ได้รับ")
-    chosen_answers: list[dict] = Field( description="คำตอบที่นักเรียนเลือกในแต่ละข้อ เช่น { 'Stu1': '1', ... }")
-    point_per_question: list[dict] = Field( description="คะแนนที่นักเรียนได้รับในแต่ละข้อ เช่น { 'Points1': 1, 'Points2': 0, ... }")
-
-class FeedbackResult(BaseModel):
-    student_id: str = Field( description="รหัสประจำตัวนักเรียน")
-    total_points: int = Field( description="คะแนนรวมที่ได้รับ")
-    percentage: float = Field( description="ร้อยละของคะแนนที่ได้รับ")
-    feedback_details: str = Field( description='รายละเอียด feedback ที่ต้องระบุใน feedback ดังนี้ {"concept/skill/ความเข้าใจ ที่นักเรียนทำได้ดีแล้วในแต่ละข้อ": "...", "จุดconcept/skill/ความเข้าใจ ที่ยังทำไม่ได้": "...", "แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้": "...", "concern จาก error_types": "..." }')
+# summarize_test_ollama = OCR_ollama.aggregate_results
 
 
-class test_state(BaseModel):
-    student_test_path: Path
-    key_answer: list[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
+conditional_edges_gemini = OCR_gemini.continue_to_ocr
+conditional_edges_ollama = OCR_ollama.continue_to_ocr
 
-    final_compiled_results: list[dict] = Field(description="ผลลัพธ์ OCR ที่ได้จากการประมวลผลแต่ละหน้า")
-    student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
+read_student_information = feedback_gemini.extract_student_information
+conditional_feedback_gemini = feedback_gemini.continue_to_feedback
+feedback_gemini_node = feedback_gemini.process_feedback
 
-    feedback : Annotated[list[FeedbackResult], operator.add] = Field(default_factory=list)
+
+if __name__ == "__main__":
+    # ระบุพาทไปยังไฟล์ PDF ของคุณ
+    pdf_file_path = Path("Documents/final_M5_022568.pdf")
+    student_test_path = Path("Documents/Intensive_Physics_4.csv")
     
-    # สำหรับ iteration loop ของแต่ละ student - ใช้ dict เพื่อ track per student
-    student_feedback_state: dict = Field(default_factory=dict, description="Dict {student_id: {iteration_count, review_results, feedback}}") 
-    
+    # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
+    start = perf_counter()
+    api_model = "Gemini"
 
-
-test_builder = StateGraph(test_state)
-
-def extract_student_information(state: test_state):
-    df = pd.read_csv(state.student_test_path).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
-    point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
-    answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
-
-    student_info = []
-    for _, row in df.iterrows():
-        student_info.append(Student(
-            student_id=str(row["StudentID"]),
-            Earned_points=row["Earned Points"],
-            chosen_answers=[{col: row[col]} for col in answer_col_list],
-            point_per_question=[{col: row[col]} for col in point_col_list]
-        ))
-    
-    return {"student_information": student_info}
-
-def continue_to_feedback(state: test_state):
-    
-    return [Send("process_feedback", {"student_information": student, "final_compiled_results": state.final_compiled_results}) 
-        for _, student in enumerate(state.student_information)]
-
-
-    
-def process_feedback(state: dict):
-
-    student = state['student_information']
-    llm, callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
-    percentage = student.Earned_points / len(student.point_per_question) * 100
-    
-    feedback_info = None
-    
-    # Loop up to 2 iterations for feedback refinement
-    for iteration in range(1, 3):
-        revision_prompt = ""
-        
-        system_message = SystemMessage(content=f"""
-                                                    ระบบปัญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
-                                                    ร่วมกับข้อมูลข้อสอบที่นักเรียนใช้สอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย
-                                                    ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง เพื่อให้ feedback ให้กับนักเรียนในการปรับปรุงการเรียนรู้และปิดช่องว่างการเรียนรู้ที่เกิดขึ้น
-                                                    แนวการตอบของระบบ
-                                                    1. ให้ระบุว่ามาจากการวิเคราะห์ด้วยปัญญาประดิษฐ์เสมอ
-                                                    2. ระบุข้อมูลประจำตัวนักเรียนดังนี้
-                                                    \t2.1 รหัสประจำตัวนักเรียน: {student.student_id}
-                                                    \t2.2 คะแนนรวมที่ได้รับ: {student.Earned_points} คะแนน จากคะแนนเต็ม {len(student.point_per_question)} คะแนน
-                                                    \t2.3 ร้อยละของคะแนนที่ได้รับ: {percentage:.2f}%
-                                                    3. รายระเอียดที่ต้องระบุใน feedback ดังนี้
-                                                    \t3.1 concept/skill/ความเข้าใจ ที่นักเรียนทำได้ดีแล้วในแต่ละข้อ (เช่น นักเรียนสามารถคำนวณข้อที่เกี่ยวกับพื้นฐานทางไฟฟ้าได้ดีแล้ว)
-                                                    \t3.2 จุดconcept/skill/ความเข้าใจ ที่ยังทำไม่ได้ โดยต้องระบุทุกจุด(เช่น ในจุดที่นักเรียนต้องพัฒนาต่อไป 1. ... 2. ... 3.ยังมีปัญหาในโจทย์ที่ซับซ้อนเรื่อง ... , 4. ... )
-                                                    \t3.3 แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้ โดยต้องระบุทุกจุดที่ยังทำไม่ได้ (เช่น แนวทางในการพัฒนาตัวเอง ได้แก่ 1. ... 2. ... 3. ...)
-                                                    \t3.4 การระบุ concept/skill/ความเข้าใจ ไม่ต้องบอกเลขข้อว่าทำข้อไหนได้หรือไม่ได้ แต่ให้บอกเป็น concept/skill/ความเข้าใจที่นักเรียนทำได้หรือยังทำไม่ได้ในแต่ละข้อสอบแทน
-                                                    \t3.5 ต้องระบุทุก concept ห้ามตกหล่นรวมถึงข้อ concern จาก error_types
-                                                    5. ตอบด้วยน้ำเสียงที่เข้าถึงง่ายเหมาะกับเด็กนักเรียนไทยในช่วงมัธยมปลาย 
-                                                    6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
-                                                    7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
-
-                                                    การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {str(test_json)}
-                                                    {revision_prompt}
-                                                """)
-        
-        human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {student.student_id} ได้รับคะแนนในแต่ละข้อดังนี้ { student.point_per_question } 
-                                             กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
-        
-        start_feedback = perf_counter()
-        response = llm.invoke([system_message, human_message], temperature=0.2)
-        end_feedback = perf_counter()
-        
-        feedback_info = FeedbackResult(
-            student_id=student.student_id,
-            total_points=student.Earned_points,
-            percentage=percentage,
-            feedback_details=response.content[0]['text'].strip()
-        )
-        
-        token_meatadata = {
-            str(datetime.now()): callback.usage_metadata,
-            "processing_time": (end_feedback - start_feedback),
-            "agent_work": "generate feedback for student",
-            "Platform": "Gemini"
-        }
-        
-        with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:
-            flock(f, LOCK_EX)
-            f.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-            flock(f, LOCK_UN)
-        
-        # Review the feedback
-        is_acceptable, quality_score, issues, suggestions = review_feedback_internal(feedback_info)
-        
-        # Log review
-        with open(f"output_feedback_review.txt", "a", encoding="utf-8") as f:
-            flock(f, LOCK_EX)
-            f.write(f"--- Review Iteration {iteration} for Student {student.student_id} ---\n")
-            f.write(f"Quality Score: {quality_score}/10\n")
-            f.write(f"Is Acceptable: {is_acceptable}\n")
-            f.write(f"Issues: {issues}\n")
-            f.write(f"Suggestions: {suggestions}\n")
-            f.write("="*80 + "\n")
-            flock(f, LOCK_UN)
-        
-        # If acceptable or last iteration, break
-        if is_acceptable or iteration >= 2:
-            break
-    
-    with open(f"output_feedback_Gemini.txt", "a", encoding="utf-8") as f:
-        flock(f, LOCK_EX)
-        f.write(feedback_info.model_dump_json(indent=2) + "\n")
-        flock(f, LOCK_UN)
-
-    return {"feedback": [feedback_info]}
-
-
-def review_feedback_internal(feedback: FeedbackResult) -> tuple:
-    """Internal review function, returns (is_acceptable, quality_score, issues, suggestions)"""
-    llm, callback = get_gemini_model(model="gemini-3.1-flash-lite-preview")
-    
-    review_system = SystemMessage(content="""
-        คุณคือผู้เชี่ยวชาญในการรีวิว feedback ที่สร้างโดยปัญญาประดิษฐ์สำหรับนักเรียนมัธยมปลายในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง
-        กรุณารีวิว feedback นี้โดยพิจารณาจากความถูกต้องของข้อมูลที่ให้ไป ความชัดเจนในการสื่อสาร ความครอบคลุมของ feedback ในการวิเคราะห์จุดแข็งและจุดที่ต้องพัฒนา และความเหมาะสมของคำแนะนำในการพัฒนาต่อไป
-        โดยมีการการพิจารณาดังนี้
-        •	ด้านความถูกต้องทางด้านวิชาการ (Academic Correctness): การเลือกใช้คำศัพท์เฉพาะทางวิทยาศาสตร์ได้อย่างถูกต้อง แม่นยำ และเหมาะสมกับระดับความรู้ของผู้เรียน 
-        •	ด้านรายละเอียดและความถูกต้องของข้อมูล (Detail and Accuracy of Information): การแสดงรายละเอียดครบถ้วน และมีความถูกต้องของข้อมูลที่กำหนดไว้ในวัตถุประสงค์การประเมินผลนอกจากนี้
-        •	ด้านความเหมาะสมของการใช้ภาษาในการให้คำแนะนำ (Appropriateness of Language):  ปัญญหาประดิษฐ์ควรใช้ภาษาที่สร้างสรรค์และให้กำลังใจ เพื่อรักษาสภาพแวดล้อมการเรียนรู้เชิงบวก โดยไม่ชมเชยจนเกินจริง 
-        •	ด้านความชัดเจนและการสื่อความหมาย (Clarity and Communication): ยึดตามมิติ Linguistic Clarity ของ Seßler et al. (2025) ที่ประเมินความชัดเจนของโครงสร้างประโยค เพื่อให้ผู้เรียนระดับเป้าหมายสามารถทำความเข้าใจได้ง่าย ไม่ซับซ้อน ซึ่งตรงกับเกณฑ์ Clarity of Feedback ในแบบประเมินผู้เชี่ยวชาญของ Chung (2025)
-
-        รีวิว feedback และตอบกลับเป็น JSON ในรูปแบบนี้:
-        {
-          "is_acceptable": true/false,
-          "quality_score": 1-10,
-          "issues": ["issue1", "issue2"],
-          "suggestions": ["suggestion1", "suggestion2"]
-        }
-    """)
-    
-    review_message = HumanMessage(content=f"""
-        กรุณารีวิว feedback นี้:
-        {feedback.feedback_details}
-    """)
-    start_review = perf_counter()
-    response = llm.invoke([review_system, review_message], temperature=0.3)
-    end_review = perf_counter()
-    token_meatadata = {
-            str(datetime.now()): callback.usage_metadata,
-            "processing_time": (end_review - start_review),
-            "agent_work": "review feedback for student",
-            "Platform": "Gemini"
-        }
-    with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:
-            flock(f, LOCK_EX)
-            f.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-            flock(f, LOCK_UN)
     try:
-        import json as json_module
-        review_data = json_module.loads(response.content)
-        return (
-            review_data.get('is_acceptable', False),
-            review_data.get('quality_score', 5),
-            review_data.get('issues', []),
-            review_data.get('suggestions', [])
-        )
-    except:
-        return (False, 5, ["Parse error"], ["Regenerate feedback"])
 
+        memory = MemorySaver()
+        config = {"configurable": {"thread_id": "1"}, "max_concurrency": 2}
 
-test_builder.add_node("extract_student_information", extract_student_information)
-test_builder.add_node("process_feedback", process_feedback)
+        if api_model == "Gemini":
+            graph = graph_process(pdf_gemini, extracted_gemini,  conditional_edges_gemini
+                                  , read_student_information, conditional_feedback_gemini, feedback_gemini_node, memory=memory)
+        else:
+            graph = graph_process(pdf_ollama, extracted_ollama, conditional_edges_ollama, memory=memory)
 
-test_builder.add_edge(START, "extract_student_information")
-test_builder.add_conditional_edges("extract_student_information", continue_to_feedback)
-test_builder.add_edge("process_feedback", END)
+        print("--- Starting Graph Execution ---")
+        for event in graph.stream({"pdf_path": pdf_file_path, 
+                                    "student_test_path": student_test_path,
+                                    "key_answer": [],
+                                    "ocr_results": [], },
+                                    config=config):
+            for k, v in event.items():
+                print(f"Completed node: {k}")
 
+        # Human in the loop step
+        state = graph.get_state(config)
+        next_step = state.next
+        if next_step and "read_student_information" in next_step:
+            print("\n--- Human Evaluation Step: OCR Results ---")
+            ocr_results = state.values.get("ocr_results", [])
+            print(f"Current OCR Results extracted {len(ocr_results)} pages.")
+            
+            # จำลองหน้าต่างแก้ไขด้วยการสร้างไฟล์ JSON ชั่วคราวให้ User แก้ไขผ่าน VS Code
+            temp_edit_file = "temp_ocr_edit.json"
+            
+            # แปลงข้อมูลเป็น Dict เพื่อเซฟลง JSON
+            ocr_results_dicts = [item.model_dump() if hasattr(item, 'model_dump') else item for item in ocr_results]
+            with open(temp_edit_file, "w", encoding="utf-8") as f:
+                json.dump(ocr_results_dicts, f, ensure_ascii=False, indent=2)
+            
+            print(f"\n[ACTION REQUIRED] ระบบได้จำลองข้อมูลให้แก้ไขไว้ที่ไฟล์: {temp_edit_file}")
+            print(">> ให้คุณเปิดไฟล์นั้นขึ้นมา แก้ไขข้อความที่ต้องการ แล้วกด Save")
+            
+            user_input = input(">> กด [Enter] เพื่ออัปเดตข้อมูลและไปต่อ (หรือพิมพ์ 'abort' เพื่อยกเลิก): ")
+            
+            if user_input.lower().strip() != 'abort':
+                # โหลดข้อมูลที่ User อาจจะแก้ไขไปแล้วกลับมา
+                with open(temp_edit_file, "r", encoding="utf-8") as f:
+                    edited_ocr_results = json.load(f)
+                
+                
+                print("\n✅ โหลดข้อมูลแก้ไขเรียบร้อยแล้ว กำลังทำขั้นตอนต่อไป...")
+                
+                # ใช้ update_state เลี่ยงปัญหา append โดยส่งไปที่ฟิลด์ ocr_user_corrections ที่สร้างใหม่
+                graph.update_state(config, {"ocr_user_corrections": edited_ocr_results}, as_node="process_ocr_page")
 
-graph = test_builder.compile()
-result = graph.invoke({"student_test_path": Path("Documents/Intensive_Physics_4.csv"), "key_answer": key_list, "final_compiled_results": test_json},config={"max_concurrency": 2})
-print(f"Total feedbacks generated: {len(result.get('feedback', []))}")
+                # สั่งรันต่อให้จบการทำงานจากจุดที่ค้างไว้
+                for event in graph.stream(None, config):
+                    for k, v in event.items():
+                        print(f"Completed node: {k}")
+            else:
+                print("Operation stopped by user.")
+        
+        final_state_values = graph.get_state(config).values
+        
+        # ถ้ายูสเซอร์แก้ไขก็จะเอา ocr_user_corrections ออกมาบึนทึกเป็น json ไม่ใช่ ocr_results เดิม
+        saved_ocr = final_state_values.get("ocr_user_corrections") if final_state_values.get("ocr_user_corrections") else final_state_values.get("ocr_results", [])
+        ocr_results_dicts = [item.model_dump() if hasattr(item, 'model_dump') else item for item in saved_ocr]
+        
+        # Create feedback table (1 row per student)
+        feedback_list = final_state_values.get("feedback", [])
+        feedback_dicts = [fb.model_dump() if hasattr(fb, 'model_dump') else fb for fb in feedback_list]
+        feedback_table = pd.DataFrame(feedback_dicts)
 
-
-
-
-
-# for i, row in sample.iterrows():
-#     print(f"{"="*20} Analyzing StudentID: {i} {'='*20}")
-#     row = row.to_dict()
-#     row = {k: row[k] for k in ["StudentID", "Earned Points"] + point_col_list}
-#     # llm = ChatOllama(model="qwen3.5:cloud", temperature=0, format="json")
-#     from time import perf_counter
-#     start_ocr_page = perf_counter()
-#     llm, callback  = get_gemini_model(model="gemini-3.1-flash-lite-preview")
-#     system_message = SystemMessage(content=f"""
-#                                                 ระบบปัญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
-#                                                 ร่วมกับข้อมูลข้อสอบที่นักเรียนใช้สอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย
-#                                                 ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง เพื่อให้ feedback ให้กับนักเรียนในการปรับปรุงการเรียนรู้และปิดช่องว่างการเรียนรู้ที่เกิดขึ้น
-#                                                 แนวการตอบของระบบ
-#                                                 1. ให้ระบุว่ามาจากการวิเคราะห์ด้วยปัญญาประดิษฐ์เสมอ
-#                                                 2. ระบุข้อมูลประจำตัวนักเรียนดังนี้
-#                                                 \t2.1 รหัสประจำตัวนักเรียน: {row['StudentID']}
-#                                                 \t2.2 คะแนนรวมที่ได้รับ: {row['Earned Points']} คะแนน จากคะแนนเต็ม {len(point_col_list)} คะแนน
-#                                                 \t2.3 ร้อยละของคะแนนที่ได้รับ: {row['Earned Points'] / len(point_col_list) * 100:.2f}%
-#                                                 3. รายระเอียดที่ต้องระบุใน feedback ดังนี้
-#                                                 \t3.1 concept/skill/ความเข้าใจ ที่นักเรียนทำได้ดีแล้วในแต่ละข้อ (เช่น นักเรียนสามารถคำนวณข้อที่เกี่ยวกับพื้นฐานทางไฟฟ้าได้ดีแล้ว)
-#                                                 \t3.2 จุดconcept/skill/ความเข้าใจ ที่ยังทำไม่ได้ โดยต้องระบุทุกจุด(เช่น ในจุดที่นักเรียนต้องพัฒนาต่อไป 1. ... 2. ... 3.ยังมีปัญหาในโจทย์ที่ซับซ้อนเรื่อง ... , 4. ... )
-#                                                 \t3.3 แนวทางในการพัฒนาในจุดที่ยังทำไม่ได้ โดยต้องระบุทุกจุดที่ยังทำไม่ได้ (เช่น แนวทางในการพัฒนาตัวเอง ได้แก่ 1. ... 2. ... 3. ...)
-#                                                 \t3.4 การระบุ concept/skill/ความเข้าใจ ไม่ต้องบอกเลขข้อว่าทำข้อไหนได้หรือไม่ได้ แต่ให้บอกเป็น concept/skill/ความเข้าใจที่นักเรียนทำได้หรือยังทำไม่ได้ในแต่ละข้อสอบแทน
-#                                                 \t3.5 ต้องระบุทุก concept ห้ามตกหล่นรวมถึงข้อ concern จาก error_types
-#                                                 5. ตอบด้วยน้ำเสียงที่เข้าถึงง่ายเหมาะกับเด็กนักเรียนไทยในช่วงมัธยมปลาย 
-#                                                 6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
-#                                                 7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
-
-#                                                 การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {str(test_json)}
-#                                             """)
+        feedback_table.to_csv(f"output_feedback_{api_model}_results.csv", index=False, encoding="utf-8")
+        
+        with open(f"output_Aggregate_{api_model}_results.json", "w", encoding="utf-8") as f:
+            json.dump(ocr_results_dicts,
+                       f, 
+                       ensure_ascii=False, 
+                       indent=2)
+        
+        # Save feedback as CSV
+        feedback_table.to_csv(f"output_feedback_{api_model}_results.csv", index=False, encoding="utf-8")
     
-#     human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {row["StudentID"]} ได้รับคะแนนในแต่ละข้อดังนี้ { {k: row[k] for k in point_col_list} } 
-#                                          กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
-   
-#     response = llm.invoke([system_message, human_message] , temperature=0.2)
-    
-#     with open(f"output_feedback.txt", "a", encoding="utf-8") as f:
-#         f.write(f"{"="*20} Analyzing StudentID: {row['StudentID']} {'='*20}\n")
-#         f.write(response.content[0]['text'].strip()+f"\n {"*"*80} \n\n")
-#     from datetime import datetime
-    
-#     end_ocr_page = perf_counter()
-#     token_meatadata = {str(datetime.now()): callback.usage_metadata,
-#                         "processing_aggregate_time_seconds": (end_ocr_page - start_ocr_page)} 
-#     with open("Token_GeminiAPI_usage_log.txt", "a", encoding="utf-8") as log_file:
-                    
-#         log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-                    
-    
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    end = perf_counter()
+    print(f"Total processing time: {end - start:.2f} seconds")

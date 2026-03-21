@@ -31,28 +31,16 @@ class PageState(TypedDict):
 
 # กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
 class OverallState(TypedDict):
+    
     pdf_path: bytes
-    # pdf_path: Path
     pages: List[str]
+    
     student_test_path: bytes
-    # student_test_path: Path
     key_answer: List[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
     student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
 
     ocr_results: Annotated[List[OCRResult], operator.add] = Field(default_factory=list) # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
+    ocr_user_corrections: list[OCRResult] = Field(default_factory=list, description="ข้อมูลแก้ไขจากผู้ใช้ในกรณีที่ OCR ผิดพลาด โดยมีรูปแบบเดียวกับ ocr_results")
 
     feedback : Annotated[list[FeedbackResult], operator.add] = Field(default_factory=list)
-    
-
-    
-
-
-
-
-
-
-
-
-
-
     
