@@ -1,6 +1,8 @@
 
 import pandas as pd
 import json
+import warnings
+warnings.filterwarnings("ignore", message=".*Deserializing.*")
 from pathlib import Path
 from time import perf_counter
 import tempfile
@@ -162,26 +164,6 @@ def run_feedback_process(edited_df, thread_id):
     except Exception as e:
         return False, f"❌ เกิดข้อผิดพลาดระหว่างสร้าง Feedback: {str(e)}", None, pd.DataFrame([{"Status": "Error"}])
 
-def get_progress_html(percentage, color="indigo"):
-    if color == "indigo":
-        bg = "linear-gradient(90deg, #6366f1, #a855f7)"
-        txt_color = "#64748b"
-    elif color == "green":
-        bg = "linear-gradient(90deg, #10b981, #059669)"
-        txt_color = "#10b981"
-    else:
-        bg = "linear-gradient(90deg, #ef4444, #dc2626)"
-        txt_color = "#ef4444"
-        
-    return f"""
-    <div style='display: flex; align-items: center; gap: 15px;'>
-        <div style='flex-grow: 1; background-color: #f1f5f9; border-radius: 999px; height: 12px; overflow: hidden;'>
-            <div style='width: {percentage}%; background: {bg}; height: 100%; border-radius: 999px; transition: width 0.5s ease;'></div>
-        </div>
-        <span style='font-size: 14px; font-weight: 600; color: {txt_color};'>{percentage}%</span>
-    </div>
-    """
-
 def create_ui():
     with gr.Blocks(
         title="Feedback System",
@@ -241,8 +223,6 @@ def create_ui():
             # --- Intermediate Processing View (Shared) ---
             with gr.Group(visible=False) as processing_group:
                 file_info = gr.HTML()
-                gr.HTML("<div style='margin-top: 15px; font-size: 14px;'>Progression...</div>")
-                progress_html = gr.HTML()
                 status_box = gr.HTML()
 
             # --- State 2: OCR Review Group ---
@@ -269,7 +249,7 @@ def create_ui():
         def handle_start_ocr(pdf, csv, s_id):
             if not pdf or not csv:
                 yield (
-                    gr.update(), gr.update(visible=True), gr.update(), gr.update(),
+                    gr.update(), gr.update(visible=True), gr.update(),
                     "<div style='color: red; text-align: center; padding: 20px;'>❌ กรุณาอัปโหลดไฟล์ทั้งสองไฟล์</div>",
                     gr.update(), gr.update(), gr.update()
                 )
@@ -294,8 +274,7 @@ def create_ui():
                 gr.update(visible=False), # input_group
                 gr.update(visible=True),  # processing_group
                 files_html,               # file_info
-                get_progress_html(10),    # progress_html
-                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ Extracting document layout & text via OCR...</span></div>",
+                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 18px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ กำลังสกัดข้อความด้วย OCR...<br><br><span style='font-size: 15px; color: #ef4444;'>ขั้นตอนนี้อาจใช้เวลาหลายนาที โปรดรอสักครู่เผื่อให้ทำงานเสร็จสมบูรณ์</span></span></div>", # status_box
                 gr.update(visible=False), # ocr_review_group
                 gr.update(),              # ocr_edit_df
                 gr.update(visible=True, interactive=True) # confirm_feedback_btn
@@ -303,17 +282,6 @@ def create_ui():
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_ocr_process, pdf, csv, s_id)
-                progress = 10
-                while not future.done():
-                    if progress < 50:
-                        progress += 2
-                    yield (
-                        gr.update(), gr.update(), gr.update(),
-                        get_progress_html(progress),
-                        gr.update(), gr.update(), gr.update(), gr.update()
-                    )
-                    time.sleep(1)
-                
                 success, result = future.result()
 
             if success:
@@ -321,7 +289,7 @@ def create_ui():
                 yield (
                     gr.update(), 
                     gr.update(visible=False), 
-                    gr.update(), gr.update(), gr.update(),
+                    gr.update(), gr.update(),
                     gr.update(visible=True), 
                     gr.update(value=result),
                     gr.update(visible=True, interactive=True, value="Confirm & Generate Feedback")
@@ -331,7 +299,6 @@ def create_ui():
                     gr.update(), 
                     gr.update(visible=True), 
                     gr.update(), 
-                    get_progress_html(100, color="red"),
                     f"<div style='color: red; text-align: center; padding: 20px;'>{result}</div>",
                     gr.update(), 
                     gr.update(),
@@ -341,7 +308,7 @@ def create_ui():
         start_ocr_btn.click(
             fn=handle_start_ocr,
             inputs=[pdf_file, csv_file, session_id],
-            outputs=[input_group, processing_group, file_info, progress_html, status_box, ocr_review_group, ocr_edit_df, confirm_feedback_btn]
+            outputs=[input_group, processing_group, file_info, status_box, ocr_review_group, ocr_edit_df, confirm_feedback_btn]
         )
 
 
@@ -350,8 +317,7 @@ def create_ui():
             yield (
                 gr.update(visible=False), # ocr_review_group
                 gr.update(visible=True),  # processing_group
-                get_progress_html(50),    # progress_html
-                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 15px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ Analyzing answers and generating feedback...</span></div>",
+                "<div style='text-align: center; padding: 40px; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 20px; font-size: 18px; color: #64748b;'><span style='animation: pulse 2s infinite;'>⏳ กำลังวิเคราะห์คำตอบและสร้าง Feedback...<br><br><span style='font-size: 15px; color: #ef4444;'>ขออภัยที่ต้องให้รอนาน ตัวแบบกำลังพิจารณาอย่างละเอียด โปรดรอสักครู่</span></span></div>", # status_box
                 gr.update(visible=False), # result_group
                 gr.update(),              # result_table
                 gr.update(),              # download_row
@@ -361,18 +327,6 @@ def create_ui():
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_feedback_process, edited_df, s_id)
-                progress = 50
-                while not future.done():
-                    if progress < 99:
-                        progress += 1
-                    yield (
-                        gr.update(), gr.update(),
-                        get_progress_html(progress),
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update()
-                    )
-                    time.sleep(1)
-                
                 success, summary, csv_path, df = future.result()
 
             if success:
@@ -380,7 +334,6 @@ def create_ui():
                 yield (
                     gr.update(), 
                     gr.update(visible=True), 
-                    get_progress_html(100, color="green"),
                     status_done,
                     gr.update(visible=True),
                     gr.update(value=df), 
@@ -392,7 +345,6 @@ def create_ui():
                 yield (
                     gr.update(visible=True), 
                     gr.update(visible=True), 
-                    get_progress_html(100, color="red"),
                     f"<div style='color: red; text-align: center;'>{summary}</div>",
                     gr.update(visible=True),
                     gr.update(value=pd.DataFrame()),
@@ -405,7 +357,7 @@ def create_ui():
         confirm_feedback_btn.click(
             fn=handle_confirm_feedback,
             inputs=[ocr_edit_df, session_id],
-            outputs=[ocr_review_group, processing_group, progress_html, status_box, result_group, result_table, download_row, download_btn, confirm_feedback_btn]
+            outputs=[ocr_review_group, processing_group, status_box, result_group, result_table, download_row, download_btn, confirm_feedback_btn]
         )
 
     return demo
