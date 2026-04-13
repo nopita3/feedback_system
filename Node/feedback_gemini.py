@@ -6,14 +6,14 @@ from fcntl import flock, LOCK_EX, LOCK_UN
 from langchain_core.messages import HumanMessage , SystemMessage
 from langgraph.constants import Send
 import json
-from config import get_gemini_model
+from config import get_gemini_model , get_ollama_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
 
 def extract_student_information(state: OverallState):
     
     
-    # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
-    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
+    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    # df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
     point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
     answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
     
@@ -21,7 +21,7 @@ def extract_student_information(state: OverallState):
     student_info = []
     for _, row in df.iterrows():
         student_info.append(Student(
-            student_id=str(row["StudentID"]),
+            student_id=str(row["ID"]),
             Earned_points=row["Earned Points"],
             chosen_answers=[{col: row[col]} for col in answer_col_list],
             point_per_question=[{col: row[col]} for col in point_col_list]
@@ -32,9 +32,9 @@ def extract_student_information(state: OverallState):
 def continue_to_feedback(state: OverallState):
     
     # ใช้ ocr_user_corrections ถ้ายูสเซอร์มีการแก้ไขให้เอามาใช้แทน ถ้าไม่มีให้ใช้ ocr_results ต้นฉบับ
-    ocr_data = state.get("ocr_user_corrections") if state.get("ocr_user_corrections") else state["ocr_results"]
+    ocr_data = state.get("ocr_results") 
     
-    return [Send("process_feedback", {"student_information": student, "ocr_user_corrections": ocr_data}) 
+    return [Send("process_feedback", {"student_information": student, "ocr_results": ocr_data}) 
         for _, student in enumerate(state["student_information"])]
 
 
@@ -44,7 +44,7 @@ def process_feedback(state: OverallState):
 
 
     student = state['student_information']
-    llm, callback = get_gemini_model(model="gemini-3.1-flash-lite-preview")
+    llm, callback = get_ollama_model(model='scb10x/typhoon2.5-qwen3-4b:latest')
     percentage = student.Earned_points / len(student.point_per_question) * 100
     
     system_message = SystemMessage(content=f"""
@@ -67,7 +67,7 @@ def process_feedback(state: OverallState):
         6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
         7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
 
-        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_user_corrections"] if state.get("ocr_user_corrections") else state["ocr_results"]}
+        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_results"] }
     """)
 
 
@@ -75,26 +75,29 @@ def process_feedback(state: OverallState):
         กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
     
     start_feedback = perf_counter()
-    response = llm.invoke([system_message, human_message], temperature=0.2)
+    response = llm.invoke([system_message, human_message])
     end_feedback = perf_counter()
+
+    feedback_details = response.content.strip() # response.content[0]['text'].strip()
     
     feedback_info = FeedbackResult(
         student_id=student.student_id,
         total_points=student.Earned_points,
         percentage=percentage,
-        feedback_details=response.content[0]['text'].strip()
+        # feedback_details=response.content[0]['text'].strip()
+        feedback_details=feedback_details
     )
 
-    with open(f"output_feedback_Gemini.txt", "a", encoding="utf-8") as f:
+    with open(f"output_feedback.txt", "a", encoding="utf-8") as f:
         flock(f.fileno(), LOCK_EX)
-        f.write(feedback_info.model_dump_json(indent=2) + "\n")
+        f.write(feedback_details + "\n")
         flock(f.fileno(), LOCK_UN)
     
     token_metadata = {
         str(datetime.now()): callback.usage_metadata,
         "processing_time": (end_feedback - start_feedback),
         "agent_work": "generate feedback for student",
-        "Platform": "Google"
+        "Platform": "Ollama"
     }
     
     with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:

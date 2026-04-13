@@ -20,12 +20,11 @@ def get_gemini_model(model="gemini-3.1-flash-lite-preview"):
     
     return gemini_llm, callback 
 
-def get_ollama_model(model="qwen3.5:cloud"):
+def get_ollama_model(model="gemma4:31b-cloud"):
     callback = UsageMetadataCallbackHandler()
-    ollama_llm = ChatOllama(model=model
-                            , temperature=0
-                            , format="json"
-                            , callbacks=[callback])
+    ollama_llm = ChatOllama(model=model,
+                            temperature=0.1,
+                            callbacks=[callback])
     
     return ollama_llm, callback
 

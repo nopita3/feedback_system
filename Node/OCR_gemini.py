@@ -1,5 +1,5 @@
 from langgraph.constants import Send
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage , SystemMessage
 
 import fitz  # PyMuPDF
 from io import BytesIO
@@ -9,19 +9,21 @@ import json
 from datetime import datetime
 from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
-from Schemes.schema import OverallState, PageState, OCRResult
+from Schemes.schema import OverallState, PageState ,OCRExamResponse
 from config import get_gemini_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
-    # doc = fitz.open(state["pdf_path"])
-    # df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
-    doc = fitz.open(stream=state["pdf_path"], filetype="pdf")
-    df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
+    doc = fitz.open(state["pdf_path"])
+    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
+    # doc = fitz.open(stream=state["pdf_path"], filetype="pdf")
+    # df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
+    labels_file = pd.read_csv("Documents/finish_class_M5.csv")
+    labels_list = [{str(row.iloc[0]):str(row.iloc[1])}  for _ ,row  in labels_file.iterrows()]
 
     # Convert numpy types to native Python types using str()
-    key_list = [ {col: str(df.loc[0, col])} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit() ][:25]
+    key_list = [{col: str(df.iloc[0][col])} for col in df.columns.to_list() if col.startswith("PriKey") and col[-1].isdigit()][:25]
     pages_list = []
     
     for page_num in range(len(doc)):
@@ -34,12 +36,12 @@ def read_and_split_pdf(state: OverallState):
         b64_img = base64.b64encode(img_bytes).decode("utf-8")
         pages_list.append(b64_img)
         
-    return {"pages": pages_list , "key_answer": key_list}
+    return {"pages": pages_list , "key_answer": key_list , "labels": labels_list}
 
 # Conditional Edge (Fan-out): บอก LangGraph ให้แตก Node การทำงานแบบ Parallel ตามจำนวนหน้า
 def continue_to_ocr(state: OverallState):
     return [
-        Send("process_ocr_page", {"page_b64": page, "page_num": i + 1 , "key_list": state["key_answer"]}) 
+        Send("process_ocr_page", {"page_b64": page, "page_num": i + 1 , "key_list": state["key_answer"] , "labels": state["labels"]}) 
         for i, page in enumerate(state["pages"])
     ]
 
@@ -67,47 +69,40 @@ def process_ocr_page(state: PageState):
 
     model_name = "gemini-3.1-flash-lite-preview"
     llm , callback  = get_gemini_model(model=model_name)
+    llm_structured = llm.with_structured_output(OCRExamResponse)
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
     prompt_text = (
         "คุณคือผู้เชี่ยวชาญการทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง  "
-        "โปรดสกัดข้อมูลจากรูปภาพข้อสอบและนำเสนอในรูปแบบ JSON Array เท่านั้น "
-        "กรุณาตอบเป็น JSON ในรูปแบบนี้:\n"
+        "โปรดสกัดข้อมูลจากรูปภาพข้อสอบและ Classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ โดยอิงจาก class label ที่กำหนดให้ด้านล่าง"
+        "กรุณาตอบในรูปแบบนี้:\n"
         "[\n"
         "  {\n"
         '    "question_id": "เลขข้อ",\n'
         '    "question_content": "เนื้อหาเฉพาะส่วนคำถามของโจทย์ (ไม่เอาตัวเลือก)",\n'
-        '    "skill_tags": ["ทักษะที่เกี่ยวข้อง เช่น การวิเคราะห์ระบบ, การคำนวณสูตร"],\n'
-        '    "misconcept_type": [{"1": "คำนวณผิดพลาด", "2": "แยกประเภทวงจรขนานกับอนุกรมไม่ได้", "3": "เข้าใจและแก้ปัญหาถูกต้อง", ...(พิมพ์ให้ครบทุกตัวเลือกและวิเคราะห์ให้ถูกต้อง)...}],\n'
         '    "image_description": "คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง"\n'
-        "  }\n"
+        '   "weekness": "ผลลัพธ์การวิเคราะห์แล้ว classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ"\n'
+        '   "class_": "class ที่เป็นไปได้สำหรับการ classify ที่เป็นตัวเลข match กับ weekness เพื่อนำไปนำไปวิเคราะห์ accuracy ของการ classify "\n'
+        "  },{...}\n"
         "]\n"
-        "ห้ามเกริ่นนำใดๆ ตอบเป็น JSON Array เท่านั้น\n"
-        "ถ้าหน้านั้นไม่ใช่ข้อสอบ เช่นระเบียบการสอบ สมการจำเป็น ให้ข้ามไปเลยไม่ต้องส่งคำตอบของข้อมูลเหล่านั้นมา สิ่งที่ต้องการมีเพียงข้อมูลของข้อสอบ\n"
-        "ข้อมูลที่ไม่มีตัวเลือกก็ให้ข้ามได้เลย ไม่เอาข้อที่แสดงวิธีทำ\n"
-        "ถ้าไม่มี misconcept_type ไม่ต้องพิมพ์เครื่องหมายขีด ให้เว้นว่างเป็น [] ไว้\n"
+        "ข้อสอบ 1 หน้ามีได้มากกว่า 1 ข้อ ต้องสกัดออกมาให้ครบทุกข้อ และให้ระบุเลขข้อให้ชัดเจนเพื่อใช้ในการเชื่อมโยงกับคำตอบที่ถูกต้องและข้อมูลนักเรียนในภายหลัง"
+        "การตอบไม่ต้องเกริ่นนำใด ๆ และให้ classify เพียง 1 class ต่อ 1 ข้อเท่านั้น"
+        
+        
     )
-    
+    sys_prompt = SystemMessage(content =[{'type': 'text', 'text': prompt_text },
+                                         {'type': 'text', 'text': f"นี่คือ class label ที่ใช้ในการ classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ: {state['labels']}"}])
     # ส่ง Message แบบระบุ base64 ใน image_url
     message = HumanMessage(
         content=[
-            {"type": "text", "text": prompt_text},
             {"type": "text", "text": f"คำตอบที่ถูกต้องของข้อสอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) มีดังนี้: {key_list}\n"},
             {"type": "image_url", "image_url": f"data:image/png;base64,{page_b64}"}
         ]
     )
     
-    response = llm.invoke([message])
+    response = llm_structured.invoke([sys_prompt, message])
     
-    
-    if isinstance(response.content, str):
-        content_text = response.content
-    elif isinstance(response.content, list):
-        text_blocks = [block.get('text', '') if isinstance(block, dict) 
-                       else str(block) for block in response.content]
-        content_text = ''.join(text_blocks)
-    else:
-        content_text = str(response.content)
+    items = response.model_dump()
 
     end_ocr_page = perf_counter()
 
@@ -126,25 +121,13 @@ def process_ocr_page(state: PageState):
     # Parse JSON string เป็น list ของ dict แล้วแปลงเป็น OCRResult objects
     ocr_results = []
     try:
-        ocr_data_list = json.loads(content_text)
-        if not isinstance(ocr_data_list, list):
-            ocr_data_list = [ocr_data_list]
-        
-        # แปลง dict เป็น OCRResult objects - skip empty items
-        for item in ocr_data_list:
-            if item:  # ตรวจสอบว่า item ไม่ว่างเปล่า
-                try:
-                    ocr_results.append(OCRResult(**item))
-                except Exception as item_error:
-                    print(f"Skipping invalid OCR item on page {page_num}: {item_error}")
-        
-        with open("output_OCR_output_debug.txt", "a", encoding="utf-8") as debug_file:
+        with open("output_OCR.txt", "a", encoding="utf-8") as debug_file:
             flock(debug_file.fileno(), LOCK_EX)
-            debug_file.write(f"{json.dumps(ocr_data_list, ensure_ascii=False, indent=2)}\n\n")
+            debug_file.write(f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n")
             flock(debug_file.fileno(), LOCK_UN)
     except json.JSONDecodeError as e:
         print(f"Error parsing JSON from page {page_num}: {e}")
-        print(f"Content was: {content_text[:200]}...")  # Print first 200 chars for debugging
+        print(f"Content was: {items}...")  # Print first 200 chars for debugging
     except Exception as e:
         print(f"Error creating OCRResult objects on page {page_num}: {e}")
 

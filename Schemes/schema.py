@@ -1,5 +1,5 @@
-from pydantic import BaseModel , Field
-from typing import Annotated, List, TypedDict
+from pydantic import BaseModel , Field , RootModel
+from typing import Annotated, TypedDict
 import operator
 from pathlib import Path
 
@@ -18,29 +18,41 @@ class FeedbackResult(BaseModel):
 class OCRResult(BaseModel):
     question_id: str = Field( description="เลขข้อ")
     question_content: str = Field( description="เนื้อหาโจทย์ (ไม่เอาตัวเลือก)")
-    skill_tags: List[str] = Field( description="ทักษะที่เกี่ยวข้อง เช่น การวิเคราะห์ระบบ, การคำนวณสูตร")
-    misconcept_type: List[dict] = Field( description='การจัดเก็บข้อมูลการ missconcept จากการตอบตัวลวง เช่น [{"1": "คำนวณผิดพลาด"  , "2": "แยกประเภทววงจรขนานกับอนุกรมไม่ได้" , "3": "เข้าใจและแก้ปัญหาถูกต้อง" , ...}]')
     image_description: str = Field( description="คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง")
+    weekness: str = Field( description='ผลลัพธ์การวิเคราะห์แล้ว classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ')
+    class_:int = Field( description="class ที่เป็นไปได้สำหรับการ classify ที่เป็นตัวเลข match กับ weekness เพื่อนำไปนำไปวิเคราะห์ accuracy ของการ classify ')")
+
+class OCRExamResponse(BaseModel):
+    ocr_results: list[OCRResult] = Field( description="ผลลัพธ์การทำ OCR และวิเคราะห์โจทย์ข้อสอบฟิสิกส์ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง โดยมีรูปแบบเป็น list ของ OCRResult")
+
+class Curriculm(RootModel):
+    root: list[dict[str, list[str]]] = Field(default_factory=list, description="ผลการเรียนรู้ และสาระการเรียนรู้ที่เกี่ยวข้องของแต่ละข้อสอบ เช่น [{ 'Assessment1': ['สาระการเรียนรู้ที่เกี่ยวข้องของข้อสอบข้อ 1', ...] }, ...]")
+    
 
 # State ย่อยสำหรับการทำ Map-Reduce (ส่งข้อมูลหน้าเดี่ยวไปในแต่ละ Node)
 class PageState(TypedDict):
     page_b64: str
     page_num: int
-    key_list : List[dict]
+    key_list : list[dict]
 
 
 # กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
 class OverallState(TypedDict):
     
-    pdf_path: bytes
-    pages: List[str]
+    pdf_path: Path
+    pages: list[str]
     
-    student_test_path: bytes
-    key_answer: List[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ List ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
+    student_test_path: Path
+    key_answer: list[dict] = Field(description="คำตอบที่ถูกต้องของข้อสอบในรูปแบบ list ของ Dict เช่น [ { 'question_id': '1', 'correct_answer': 'คำตอบที่ถูกต้องของข้อ 1' }, ... ]")
     student_information: list[Student] = Field(default_factory=list, description="ข้อมูลนักเรียนที่มีรหัสประจำตัวและคะแนนในแต่ละข้อสอบของนักเรียนแต่ละคน")
 
-    ocr_results: Annotated[List[OCRResult], operator.add] = Field(default_factory=list) # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
+    ocr_results: Annotated[OCRExamResponse, operator.add] = Field(default_factory=list) # ใช้ operator.add เพื่อรวบรวม Results จาก Parallel Nodes
     ocr_user_corrections: list[OCRResult] = Field(default_factory=list, description="ข้อมูลแก้ไขจากผู้ใช้ในกรณีที่ OCR ผิดพลาด โดยมีรูปแบบเดียวกับ ocr_results")
 
     feedback : Annotated[list[FeedbackResult], operator.add] = Field(default_factory=list)
-    
+    labels : list[dict] = Field(default_factory=list, description="class ที่เป็นไปได้สำหรับการ classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ")
+
+class CurriculumState(TypedDict):
+    curriculum_path: str
+    pages: list[str]
+    curriculum_analysis: list[Curriculm]= Field(default_factory=list)
