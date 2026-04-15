@@ -11,6 +11,15 @@ from fcntl import flock, LOCK_EX, LOCK_UN
 from Schemes.schema import OverallState, PageState ,OCRExamResponse
 from config import get_gemini_model , get_ollama_model
 
+def llm_select(platform_name: str):
+    
+    if platform_name== "gemini":
+        return get_gemini_model()
+    elif platform_name == "ollama":
+        return get_ollama_model()
+
+    else:
+        raise ValueError(f"Unsupported LLM name: {platform_name}")
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
@@ -38,8 +47,13 @@ def read_and_split_pdf(state: OverallState):
 # Conditional Edge (Fan-out): บอก LangGraph ให้แตก Node การทำงานแบบ Parallel ตามจำนวนหน้า
 def continue_to_ocr(state: OverallState):
     return [
-        Send("process_ocr_page", {"page_b64": page, 'progress': [i, len(state["pages"])], "key_list": state["key_answer"] , "labels": state["labels"]}) 
-        for i, page in enumerate(state["pages"])
+        Send("process_ocr_page", {"page_b64": page, 
+                                  'progress': [i, len(state["pages"])], 
+                                  "key_list": state["key_answer"] , 
+                                  "labels": state["labels"] , 
+                                  'llm_OCR_platform': state["llm_OCR_platform"]}) 
+                                  
+                                  for i, page in enumerate(state["pages"])
     ]
 
 # Node: ประมวลผลแต่ละหน้าแบบ Parallel โดยรับ State แบบเดี่ยว (PageState)
@@ -67,7 +81,7 @@ def process_ocr_page(state: PageState):
     print(f"⏳Processing OCR page📸 {progress[0]+1} of {progress[1]}...")
 
     
-    llm , callback  = get_ollama_model()
+    llm , callback  = llm_select(state["llm_OCR_platform"])
     llm_structured = llm.with_structured_output(OCRExamResponse)
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ

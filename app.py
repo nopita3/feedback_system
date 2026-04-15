@@ -4,22 +4,22 @@ import json
 from graphs.graph_process import graph_process
 from graphs.graph_process_sequencial import graph_process_seq
 from graphs.graph_process_manual import graph_process as graph_process_manual
-from Node import OCR_gemini
+from Node import OCR
 
-from Node import feedback_gemini
+from Node import feedback
 from Node import manual_result
 
 
-pdf_gemini = OCR_gemini.read_and_split_pdf
+pdf_gemini = OCR.read_and_split_pdf
 
 
-extracted_gemini = OCR_gemini.process_ocr_page
-conditional_edges_gemini = OCR_gemini.continue_to_ocr
+extracted_gemini = OCR.process_ocr_page
+conditional_edges_gemini = OCR.continue_to_ocr
 
 
-read_student_information = feedback_gemini.extract_student_information
-conditional_feedback_gemini = feedback_gemini.continue_to_feedback
-feedback_gemini_node = feedback_gemini.process_feedback
+read_student_information = feedback.extract_student_information
+conditional_feedback_gemini = feedback.continue_to_feedback
+feedback_gemini_node = feedback.process_feedback
 manual_ocr_node = manual_result.Manual_process_ocr_page
 
 if __name__ == "__main__":

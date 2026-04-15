@@ -33,11 +33,16 @@ class PageState(TypedDict):
     page_b64: str
     key_list : list[dict]
     progress: list[int,int]
+    llm_OCR_platform: str
+    labels: list[dict]
 
 
 
 # กำหนดรูปแบบ State ของระบบ (อัปเดตกลับมาเป็น Parallel)
 class OverallState(TypedDict):
+
+    llm_OCR_platform: str 
+    llm_feedback_platform: str
     
     pdf_path: Path
     pages: list[str]

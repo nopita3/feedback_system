@@ -9,6 +9,17 @@ import json
 from config import get_gemini_model , get_ollama_model , get_typhoon_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
 
+def llm_select(platform_name: str):
+    
+    if platform_name== "gemini":
+        return get_gemini_model()
+    elif platform_name == "ollama":
+        return get_ollama_model()
+    elif platform_name == "typhoon":
+        return get_typhoon_model()
+    else:
+        raise ValueError(f"Unsupported LLM name: {platform_name}")
+
 def extract_student_information(state: OverallState):
     
     
@@ -33,8 +44,12 @@ def continue_to_feedback(state: OverallState):
     # ใช้ ocr_user_corrections ถ้ายูสเซอร์มีการแก้ไขให้เอามาใช้แทน ถ้าไม่มีให้ใช้ ocr_results ต้นฉบับ
     ocr_data = state.get("ocr_results") 
     
-    return [Send("process_feedback", {"student_information": student, "ocr_results": ocr_data , 'feed_progress': [i, len(state["student_information"])]}) 
-        for i, student in enumerate(state["student_information"])]
+    return [Send("process_feedback", {"student_information": student, 
+                                      "ocr_results": ocr_data , 
+                                      'feed_progress': [i, len(state["student_information"]),] , 
+                                      'llm_feedback_platform': state["llm_feedback_platform"]}) 
+                                      for i, student in enumerate(state["student_information"])]
+        
 
 
     
@@ -43,7 +58,7 @@ def process_feedback(state: OverallState):
 
 
     student = state['student_information']
-    llm, callback = get_typhoon_model()
+    llm, callback = llm_select(state["llm_feedback_platform"])
     percentage = student.Earned_points / len(student.point_per_question) * 100
 
     progress = state['feed_progress']
@@ -51,8 +66,8 @@ def process_feedback(state: OverallState):
     
     system_message = SystemMessage(content=f"""
         ระบบปัญญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
-        ร่วมกับข้อมูลข้อสอบที่นักเรียนใช้สอบในวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย
-        ในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) 4 เรื่องไฟฟ้าสถิตและไฟฟ้ากระแสตรง เพื่อให้ feedback ให้กับนักเรียนในการปรับปรุงการเรียนรู้และปิดช่องว่างการเรียนรู้ที่เกิดขึ้น
+        ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทยในส่วนของวิชาฟิสิกส์ (เพิ่มเติม) (ไม่มีการเรียนแคลคูลัสในระดับชั้นนี้ให้แนะนำด้วยวิธีที่ไม่ต้องใช้แคลคูลัส)
+        เพื่อให้ feedback ให้กับนักเรียนในการปรับปรุงการเรียนรู้และปิดช่องว่างการเรียนรู้ที่เกิดขึ้น
         แนวการตอบของระบบ
         1. ให้ระบุว่ามาจากการวิเคราะห์ด้วยปัญญาประดิษฐ์เสมอ
         2. ระบุข้อมูลประจำตัวนักเรียนดังนี้
@@ -68,7 +83,8 @@ def process_feedback(state: OverallState):
         5. ตอบด้วยน้ำเสียงที่เข้าถึงง่ายเหมาะกับเด็กนักเรียนไทยในช่วงมัธยมปลาย 
         6. ใช้ภาษาไทยเท่านั้นในการสื่อสารออกไป
         7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
-
+        
+        ถ้ามีสมการในเนื้อหาให้เขียนอยู่ในรูปแบบ LaTeX และใช้ MathJax ในการแสดงผลสมการนั้น ๆ ในส่วนของ feedback
         การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_results"] }
     """)
 
@@ -80,8 +96,12 @@ def process_feedback(state: OverallState):
     response = llm.invoke([system_message, human_message])
     end_feedback = perf_counter()
 
-    feedback_details = response.content.strip() 
-    # feedback_details = response.content[0]['text'].strip()
+
+    if state["llm_feedback_platform"] == "gemini":
+        feedback_details = response.content[0]['text'].strip()
+    else:
+        feedback_details = response.content.strip() 
+
     
     feedback_info = FeedbackResult(
         student_id=student.student_id,
