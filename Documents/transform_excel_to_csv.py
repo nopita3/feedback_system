@@ -30,7 +30,7 @@ def transform_excel_to_csv(excel_file, csv_file):
 if __name__ == "__main__":
     
     
-    input_file = Path("Documents/quiz-M5_Intensive Physics 4_25_5-full.xlsx")
-    output_file = Path("Documents/Intensive_Physics_4.csv")
+    input_file = Path("Documents/quiz-M4_Intensive Physics 2_25_5-full.xlsx")
+    output_file = Path("Documents/Intensive_Physics_2.csv")
     
     transform_excel_to_csv(input_file, output_file)

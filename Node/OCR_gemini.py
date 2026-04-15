@@ -2,7 +2,6 @@ from langgraph.constants import Send
 from langchain_core.messages import HumanMessage , SystemMessage
 
 import fitz  # PyMuPDF
-from io import BytesIO
 import pandas as pd
 import base64
 import json 
@@ -10,16 +9,14 @@ from datetime import datetime
 from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
 from Schemes.schema import OverallState, PageState ,OCRExamResponse
-from config import get_gemini_model
+from config import get_gemini_model , get_ollama_model
 
 
 # Node: ใช้ PyMuPDF อ่านไฟล์ PDF และแปลงแต่ละหน้าเป็น Base64
 def read_and_split_pdf(state: OverallState):
     doc = fitz.open(state["pdf_path"])
     df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42)
-    # doc = fitz.open(stream=state["pdf_path"], filetype="pdf")
-    # df = pd.read_csv(BytesIO(state["student_test_path"])).sample(5, random_state=42)
-    labels_file = pd.read_csv("Documents/finish_class_M5.csv")
+    labels_file = pd.read_csv(state["labels_path"])
     labels_list = [{str(row.iloc[0]):str(row.iloc[1])}  for _ ,row  in labels_file.iterrows()]
 
     # Convert numpy types to native Python types using str()
@@ -41,7 +38,7 @@ def read_and_split_pdf(state: OverallState):
 # Conditional Edge (Fan-out): บอก LangGraph ให้แตก Node การทำงานแบบ Parallel ตามจำนวนหน้า
 def continue_to_ocr(state: OverallState):
     return [
-        Send("process_ocr_page", {"page_b64": page, "page_num": i + 1 , "key_list": state["key_answer"] , "labels": state["labels"]}) 
+        Send("process_ocr_page", {"page_b64": page, 'progress': [i, len(state["pages"])], "key_list": state["key_answer"] , "labels": state["labels"]}) 
         for i, page in enumerate(state["pages"])
     ]
 
@@ -64,11 +61,13 @@ def process_ocr_page(state: PageState):
     strat_ocr_page = perf_counter()
 
     page_b64 = state["page_b64"]
-    page_num = state["page_num"]
+    progress = state["progress"]
     key_list = state["key_list"]
 
-    model_name = "gemini-3.1-flash-lite-preview"
-    llm , callback  = get_gemini_model(model=model_name)
+    print(f"⏳Processing OCR page📸 {progress[0]+1} of {progress[1]}...")
+
+    
+    llm , callback  = get_ollama_model()
     llm_structured = llm.with_structured_output(OCRExamResponse)
     
     # สร้างโจทย์ (Prompt) เพื่อให้โมเดลทำความเข้าใจโครงสร้างภาพและอ่านไฟล์ข้อสอบ
@@ -87,6 +86,7 @@ def process_ocr_page(state: PageState):
         "]\n"
         "ข้อสอบ 1 หน้ามีได้มากกว่า 1 ข้อ ต้องสกัดออกมาให้ครบทุกข้อ และให้ระบุเลขข้อให้ชัดเจนเพื่อใช้ในการเชื่อมโยงกับคำตอบที่ถูกต้องและข้อมูลนักเรียนในภายหลัง"
         "การตอบไม่ต้องเกริ่นนำใด ๆ และให้ classify เพียง 1 class ต่อ 1 ข้อเท่านั้น"
+        "พึงระวัง: ต้องตอบกลับมาเป็น JSON Object ที่มี key ชื่อ ocr_results และ value เป็นข้อมูล array เสมอ"
         
         
     )
@@ -109,7 +109,7 @@ def process_ocr_page(state: PageState):
     token_meatadata = {str(datetime.now()): callback.usage_metadata,
                         "processing_time": (end_ocr_page - strat_ocr_page),
                         "agent_work": "OCR and Extract information each page",
-                        "Platform": "Google" }
+                     }
     try:
         with open("Token_usage_log.txt", "a", encoding="utf-8") as log_file:
             flock(log_file.fileno(), LOCK_EX)
@@ -118,18 +118,8 @@ def process_ocr_page(state: PageState):
     except Exception as e:
         print(f"Token log write error: {e}")
     
-    # Parse JSON string เป็น list ของ dict แล้วแปลงเป็น OCRResult objects
-    ocr_results = []
-    try:
-        with open("output_OCR.txt", "a", encoding="utf-8") as debug_file:
-            flock(debug_file.fileno(), LOCK_EX)
-            debug_file.write(f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n")
-            flock(debug_file.fileno(), LOCK_UN)
-    except json.JSONDecodeError as e:
-        print(f"Error parsing JSON from page {page_num}: {e}")
-        print(f"Content was: {items}...")  # Print first 200 chars for debugging
-    except Exception as e:
-        print(f"Error creating OCRResult objects on page {page_num}: {e}")
+    ocr_results = items.get("ocr_results", [])
+    
 
     return {"ocr_results": ocr_results}
 

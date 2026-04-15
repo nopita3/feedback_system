@@ -22,8 +22,9 @@ def OCR_curriculum(state: CurriculumState):
 
     
 
-    system_prompt =SystemMessage(content="""*ระบบ OCR หลักสูตรการเรียนรู้ ของวิชาฟิสิกส์เข้มข้น 4 (Intensive Physics 4) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย*
+    system_prompt =SystemMessage(content="""*ระบบ OCR หลักสูตรการเรียนรู้ ของวิชาฟิสิกส์เข้มข้น 2 (Intensive Physics 2) ที่อิงตามหลักสูตรแกนกลางของกระทรวงศึกษาธิการไทย*
     *สกัดข้อมูลตจากส่วนที่เป็นตารางในรูปภาพเท่านั้น*
+    *สกัดข้อมูลเฉพาะเรื่องบทเรียนเรื่อง การเคลื่อนแบบวงกลม การสั่นอย่างง่าย และสมบัติของแข็งเท่านั้น*
     *ระบบนนี้มีหน้าที่สกัดผลการเรียนรู้ว่ามีสาระการเรียนอะไรบ้างที่เกี่ยวข้องกับข้อสอบแต่ละข้อ*
     *ระบบจะได้รับข้อมูลรูปภาพเป็น bytes และสกัดข้อมูลของข้อสอบแต่ละข้อที่ได้จากการทำ OCR มาแล้วในรูปแบบ นี้:*
     [{'*ผลการเรียนรู้....': ['*สาระการเรียนรู้ที่เกี่ยวข้องของข้อสอบข้อ 1', ...]}, ...]
@@ -58,8 +59,8 @@ builder.add_edge("OCR_curriculum", END)
 
 def main():
     base_dir = Path(__file__).resolve().parents[1]
-    pdf_path = str(base_dir / "Documents/cur_intensive_physics_4.pdf")
-    log_path = str(base_dir / "Curriculum_OCR_result.txt")
+    pdf_path = str(base_dir / "Documents/cur_intensive_physics_2.pdf")
+    log_path = str(base_dir / "Curriculum_OCR_result_2.txt")
     graph = builder.compile()
     result = graph.invoke({'curriculum_path': pdf_path, 'pages': [], 'curriculum_analysis': []})
     output = result.get('curriculum_analysis', [])

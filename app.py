@@ -14,7 +14,7 @@ import gradio as gr
 from langgraph.checkpoint.memory import MemorySaver
 
 from Node import OCR_gemini, feedback_gemini
-from graph_process import graph_process
+from graphs.graph_process import graph_process
 
 # Configure models
 pdf_gemini = OCR_gemini.read_and_split_pdf
