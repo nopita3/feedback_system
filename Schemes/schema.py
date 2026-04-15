@@ -18,7 +18,7 @@ class OCRResult(BaseModel):
     question_id: str = Field( description="เลขข้อ")
     question_content: str = Field( description="เนื้อหาโจทย์ (ไม่เอาตัวเลือก)")
     image_description: str = Field( description="คำอธิบายรูปภาพอย่างละเอียด (ถ้ามี) เช่น ประจุ a อยู่ตำแหน่ง x=1 หรือถ้าไม่มีรูปให้ใส่เว้นว่าง")
-    weekness: str = Field( description='ผลลัพธ์การวิเคราะห์แล้ว classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ')
+    Exam_objecttive: str = Field( description='ผลลัพธ์การวิเคราะห์แล้ว classify ข้อผิดพลาดของนักเรียนในแต่ละข้อ')
     class_:str = Field( description="class ที่เป็นไปได้สำหรับการ classify ที่เป็นตัวเลข match กับ weekness เพื่อนำไปนำไปวิเคราะห์ accuracy ของการ classify ')")
 
 class OCRExamResponse(BaseModel):

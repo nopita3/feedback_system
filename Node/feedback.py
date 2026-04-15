@@ -85,7 +85,7 @@ def process_feedback(state: OverallState):
         7. ถ้าน้องทำคะแนนรวมได้สูงมากให้ชื่นชม แต่ถ้าไม่สูงต้องให้กำลังใจการพัฒนาต่อไปอย่างเป็นธรรมชาติที่มนุษย์คุยกันทั่วไป
         
         ถ้ามีสมการในเนื้อหาให้เขียนอยู่ในรูปแบบ LaTeX และใช้ MathJax ในการแสดงผลสมการนั้น ๆ ในส่วนของ feedback
-        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบมีดังนี้: {state["ocr_results"] }
+        การพิจารณาข้อมูลข้อสอบให้พิจารณาทุกด้านของข้อสอบ โดยข้อมูลของข้อสอบโดยมี Exam_objecttive ที่ระบุวัตถุประสงค์ของแต่ละข้อ โดยมีดังนี้: {state["ocr_results"] }
     """)
 
 
@@ -125,10 +125,7 @@ def process_feedback(state: OverallState):
         f.write(json.dumps(token_metadata, ensure_ascii=False, default=str) + "\n")
         flock(f.fileno(), LOCK_UN)
 
-    with open(f"files_log/foutput_feedback_{list(callback.usage_metadata.keys())[0].replace('/', '_')}.txt", "a", encoding="utf-8") as f:
-        flock(f.fileno(), LOCK_EX)
-        f.write(feedback_details + "\n")
-        flock(f.fileno(), LOCK_UN)
+    
 
     return {"feedback": [feedback_info]}
 

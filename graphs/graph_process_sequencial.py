@@ -13,7 +13,8 @@ def graph_process_seq(read_and_split_pdf, process_ocr_page, read_student_informa
                 "page_b64": page,
                 "progress": [i, len(pages)],
                 "key_list": state.get("key_answer", []),
-                "labels": state.get("labels", [])
+                "labels": state.get("labels", []),
+                "llm_OCR_platform": state.get("llm_OCR_platform", "")
             }
             res = process_ocr_page(page_state)
             if "ocr_results" in res:
