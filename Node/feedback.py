@@ -6,6 +6,9 @@ from fcntl import flock, LOCK_EX, LOCK_UN
 from langchain_core.messages import HumanMessage , SystemMessage
 from langgraph.constants import Send
 import json
+from google.genai.errors import ServerError , ClientError
+from ollama._types import ResponseError 
+from openai import RateLimitError , APITimeoutError , BadRequestError
 from config import get_gemini_model , get_ollama_model , get_typhoon_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
 
@@ -23,7 +26,7 @@ def llm_select(platform_name: str):
 def extract_student_information(state: OverallState):
     
     
-    df = pd.read_csv(state["student_test_path"]).sample(5, random_state=42) #อย่าลืมเอา sample เวลาไปรวม node จริง ๆด้วยนะ
+    df = pd.read_csv(state["student_test_path"])
     point_col_list = [ col for col in df.columns.to_list() if col.startswith("Points") and col[-1].isdigit() ][:25]
     answer_col_list = [ col for col in df.columns.to_list() if col.startswith("Stu") and col[-1].isdigit() ][:25]
     
@@ -55,7 +58,9 @@ def continue_to_feedback(state: OverallState):
     
 def process_feedback(state: OverallState):
 
+    import time
 
+    
 
     student = state['student_information']
     llm, callback = llm_select(state["llm_feedback_platform"])
@@ -63,6 +68,8 @@ def process_feedback(state: OverallState):
 
     progress = state['feed_progress']
     print(f"⏳Processing feedback✍🏻 {progress[0]+1} of {progress[1]}...")
+    if (progress[0]+1) % 3 == 0:  # Every 2nd student
+        time.sleep(40)  # Simulate processing time
     
     system_message = SystemMessage(content=f"""
         ระบบปัญญาประดิษฐ์ถูกใช้เพื่อประมวลผลทางภาษาเพื่อวิเคราะห์คะแนนที่นักเรียนได้รับจากการทำข้อสอบในแต่ละข้อ 
@@ -92,41 +99,84 @@ def process_feedback(state: OverallState):
     human_message = HumanMessage(content=f"""นักเรียนที่มีรหัส {student.student_id} ได้รับคะแนนในแต่ละข้อดังนี้ {student.point_per_question}
         กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
     
-    start_feedback = perf_counter()
-    response = llm.invoke([system_message, human_message])
-    end_feedback = perf_counter()
+    try:
+        start_feedback = perf_counter()
+        response = llm.invoke([system_message, human_message])
+        end_feedback = perf_counter()
 
 
-    if state["llm_feedback_platform"] == "gemini":
-        feedback_details = response.content[0]['text'].strip()
-    else:
-        feedback_details = response.content.strip() 
+        if state["llm_feedback_platform"] == "gemini":
+            feedback_details = response.content[0]['text'].strip()
+        else:
+            feedback_details = response.content.strip() 
 
-    
-    feedback_info = FeedbackResult(
-        student_id=student.student_id,
-        total_points=student.Earned_points,
-        percentage=percentage,
         
-        feedback_details=feedback_details
-    )
+        feedback_info = FeedbackResult(
+            student_id=student.student_id,
+            total_points=student.Earned_points,
+            percentage=percentage,
+            
+            feedback_details=feedback_details
+        )
 
-    
-    
-    token_metadata = {
-        str(datetime.now()): callback.usage_metadata,
-        "processing_time": (end_feedback - start_feedback),
-        "agent_work": "generate feedback for student",
-        
-    }
-    
-    with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:
-        flock(f.fileno(), LOCK_EX)
-        f.write(json.dumps(token_metadata, ensure_ascii=False, default=str) + "\n")
-        flock(f.fileno(), LOCK_UN)
+        token_metadata = {
+            str(datetime.now()): callback.usage_metadata,
+            "processing_time": (end_feedback - start_feedback),
+            "agent_work": "generate feedback for student",
+            'platform': state["llm_feedback_platform"]
+        }
 
+        with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:
+            flock(f.fileno(), LOCK_EX)
+            f.write(json.dumps(token_metadata, ensure_ascii=False, default=str) + "\n")
+            flock(f.fileno(), LOCK_UN)
+        return {"feedback": [feedback_info]}
     
+    except ServerError as e:
+        print(f"Error occurred while generating feedback for student {student.student_id}: {e}")
+        time.sleep(120)
+        feedback_info = FeedbackResult(
+            student_id=student.student_id,
+            total_points=student.Earned_points,
+            percentage=percentage,
+            
+            feedback_details="Null"
+        )
+        return {"feedback": [feedback_info]}
+    
+    except BadRequestError as e:
+        print(f"Bad request error occurred while generating feedback for student {student.student_id}: {e}")
+        time.sleep(120)
+        feedback_info = FeedbackResult(
+            student_id=student.student_id,
+            total_points=student.Earned_points,
+            percentage=percentage,
+            
+            feedback_details="Null"
+        )
+        return {"feedback": [feedback_info]}
+    
+    except ResponseError as e:
+        if e.status_code >= 500:
+            print(f"Server error occurred while generating feedback for student {student.student_id}: {e}")
+            time.sleep(120)
+            feedback_info = FeedbackResult(
+                student_id=student.student_id,
+                total_points=student.Earned_points,
+                percentage=percentage,
+                
+                feedback_details="Null"
+            )
+            return {"feedback": [feedback_info]}
+        raise ValueError(f"Error occurred while generating feedback for student {student.student_id}: {e}")
 
-    return {"feedback": [feedback_info]}
+    except ClientError as e:
+        raise ValueError(f"Error occurred while generating feedback for student {student.student_id}: {e}")
+
+    except RateLimitError as e:
+        raise ValueError(f"Rate limit error occurred while generating feedback for student {student.student_id}: {e}")
+    except APITimeoutError as e:
+        raise ValueError(f"API timeout error occurred while generating feedback for student {student.student_id}: {e}")
+    
 
 

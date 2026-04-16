@@ -123,6 +123,7 @@ def process_ocr_page(state: PageState):
     token_meatadata = {str(datetime.now()): callback.usage_metadata,
                         "processing_time": (end_ocr_page - strat_ocr_page),
                         "agent_work": "OCR and Extract information each page",
+                        'platform': state["llm_OCR_platform"]
                      }
     try:
         with open("Token_usage_log.txt", "a", encoding="utf-8") as log_file:

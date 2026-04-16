@@ -15,7 +15,7 @@ def transform_excel_to_csv(excel_file, csv_file):
         df = df.drop(axis=1 , columns=['QuizName','QuizClass','FirstName','LastName','StudentID','CustomID'])
         
         # Shuffle the rows
-        df = df.sample(n=50, random_state=101).reset_index(drop=True)
+        df = df.sample(n=60, random_state=101).reset_index(drop=True)
         id_series = pd.Series(df.index + 1, name='ID')        
         df = pd.concat([id_series, df], axis=1)
         # Write to CSV with UTF-8 encoding

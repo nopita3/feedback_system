@@ -13,29 +13,31 @@ gemini_api_key = os.getenv('gemini_api_key')
 typhoon_api_key = os.getenv('typhoon_api_key')
 
 
-def get_gemini_model(model="gemini-3.1-flash-lite-preview"):
+def get_gemini_model(model="gemini-flash-lite-latest"):
     callback = UsageMetadataCallbackHandler()
     gemini_llm = ChatGoogleGenerativeAI(model=model, 
                                  temperature=0,  
                                  api_key=gemini_api_key, 
-                                 callbacks=[callback])
-    
+                                 callbacks=[callback],
+                                 max_output_tokens=2700)    
     
     return gemini_llm, callback 
 
-def get_ollama_model(model="gemma4:31b-cloud"):
+def get_ollama_model(model="qwen3.5:cloud"):
     callback = UsageMetadataCallbackHandler()
     ollama_llm = ChatOllama(model=model,
                             temperature=0,
-                            num_ctx=6000,
-                            callbacks=[callback])
+                            num_ctx=4096,
+                            callbacks=[callback],
+                            )
     
     return ollama_llm, callback
 
 def get_typhoon_model(model="typhoon-v2.5-30b-a3b-instruct"):
     callback = UsageMetadataCallbackHandler()
     openai_llm = ChatOpenAI(model=model, 
-                            temperature=0,  
+                            temperature=0,
+                            reasoning_effort="medium",
                             max_tokens=12288,
                             api_key=typhoon_api_key,
                             base_url="https://api.opentyphoon.ai/v1", 

@@ -40,7 +40,7 @@ def convert_to_html(data):
             }
             body {
                 font-family: 'Sarabun', sans-serif;
-                font-size: 14px;
+                font-size: 11px;
                 line-height: 1.6;
                 color: #333;
                 background-color: #fff;
@@ -141,7 +141,16 @@ def convert_to_html(data):
             pct_formatted = f"{pct}%"
             
         feedback_raw = student.get('feedback_details', '')
-        
+
+        # Preprocess: convert LaTeX inline delimiters \( ... \) to $...$ so Markdown->HTML keeps math intact
+        # Preserve backslashes for commands like \frac
+        if feedback_raw:
+            import re
+            # replace \( ... \) (non-greedy) with $...$
+            feedback_raw = re.sub(r'\\\((.+?)\\\)', r'$\1$', feedback_raw, flags=re.S)
+            # replace \[ ... \] (display math) with $$...$$ to preserve display math through Markdown
+            feedback_raw = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', feedback_raw, flags=re.S)
+
         # Convert Markdown to HTML
         md = markdown.Markdown(extensions=['tables', 'fenced_code', 'nl2br'])
         feedback_html = md.convert(feedback_raw)
@@ -185,7 +194,7 @@ async def create_student_pdf(data):
     
     # Save temporary html
     temp_html_path = "files_log/temp_render.html"
-    pdf_path = "files_log/feedback_results.pdf"
+    pdf_path = "files_log/feedback_results_M5.pdf"
     
     os.makedirs("files_log", exist_ok=True)
     with open(temp_html_path, "w", encoding="utf-8") as f:
@@ -224,7 +233,7 @@ async def create_student_pdf(data):
 
 def main():
     try:
-        with open("files_log/final_feedback_results.json", "r", encoding="utf-8") as f:
+        with open("files_log/final_feedback_results_M5.json", "r", encoding="utf-8") as f:
             data = json.load(f)
         
         if isinstance(data, dict):
