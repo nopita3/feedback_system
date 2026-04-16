@@ -1,6 +1,8 @@
 from pathlib import Path
 
 import json
+
+from pydantic import BaseModel
 from graphs.graph_process import graph_process
 from graphs.graph_process_sequencial import graph_process_seq
 from graphs.graph_process_manual import graph_process as graph_process_manual
@@ -24,13 +26,13 @@ manual_ocr_node = manual_result.Manual_process_ocr_page
 
 if __name__ == "__main__":
     # ระบุพาทไปยังไฟล์ PDF ของคุณ
-    pdf_file_path = Path("Documents/final_M4_022568.pdf")
-    student_test_path = Path("Documents/Intensive_Physics_2.csv")
-    labels_path = Path("Documents/finish_class_M4.csv")
+    pdf_file_path = Path("Documents/final_M5_022568.pdf")
+    student_test_path = Path("Documents/Intensive_Physics_4.csv")
+    labels_path = Path("Documents/finish_class_M5.csv")
     
     # เริ่มต้นการทำงาน (Invoke) แบบ Parallel แต่จำกัด request ป้องกัน Rate limit API
 
-    mode = 'manual'
+    mode = 'manual'  # sequential, manual, parallel
     if mode == 'sequential':
         graph = graph_process_seq(pdf_gemini, 
                                   extracted_gemini, 
@@ -51,21 +53,26 @@ if __name__ == "__main__":
                               feedback_gemini_node)
     
         
-    config = {"configurable": {"thread_id": "1"}, "max_concurrency": 2}
+    config = {"configurable": {"thread_id": "1"}, "max_concurrency": 5}
     final_state = graph.invoke({"pdf_path": pdf_file_path, 
                     "student_test_path": student_test_path,
-                    'labels_path': labels_path
+                    'labels_path': labels_path,
+                    "llm_OCR_platform": "ollama", 
+                    "llm_feedback_platform": "typhoon"
                     }, 
                     config=config)
     
     ocr_results = final_state.get("ocr_results", [])
+    feedback_list = final_state.get("feedback", [])
 
-    feedback: list = final_state.get("feedback", [])
 
-
-    with open('files_log/final_ocr_results.json', 'w', encoding='utf-8') as f:
+    with open('files_log/final_ocr_results_M5.json', 'w', encoding='utf-8') as f:
         json.dump(ocr_results, f, ensure_ascii=False, indent=2)
 
-    with open('files_log/final_feedback_results.json', 'w', encoding='utf-8') as f:
-        feedback_list = [i.model_dump() for i in feedback]
+    with open('files_log/final_feedback_results_M5.json', 'w', encoding='utf-8') as f:
+        feedback_list = [i.model_dump() for i in feedback_list]
         json.dump(feedback_list, f, ensure_ascii=False, indent=2)
+    
+    
+
+       
