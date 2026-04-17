@@ -11,6 +11,7 @@ from ollama._types import ResponseError
 from openai import RateLimitError , APITimeoutError , BadRequestError
 from config import get_gemini_model , get_ollama_model , get_typhoon_model
 from Schemes.schema import OverallState,  FeedbackResult, Student
+from utils.log_collecting import log_token_usage
 
 def llm_select(platform_name: str):
     
@@ -100,6 +101,7 @@ def process_feedback(state: OverallState):
         กรุณาวิเคราะห์คะแนนที่นักเรียนได้รับในแต่ละข้อ และให้คำแนะนำในการปรับปรุงการทำข้อสอบในอนาคต""")
     
     try:
+        start_date = datetime.now()
         start_feedback = perf_counter()
         response = llm.invoke([system_message, human_message])
         end_feedback = perf_counter()
@@ -119,17 +121,18 @@ def process_feedback(state: OverallState):
             feedback_details=feedback_details
         )
 
-        token_metadata = {
-            str(datetime.now()): callback.usage_metadata,
-            "processing_time": (end_feedback - start_feedback),
-            "agent_work": "generate feedback for student",
-            'platform': state["llm_feedback_platform"]
-        }
+        log_token_usage(callback, 
+                    start_date = start_date,
+                    processtime = (end_feedback - start_feedback),
+                    platform = state["llm_feedback_platform"],
+                    agent_work = "generate feedback for student"
+                    )
+        if (progress[0]+1) % 10 == 0:  # Every 10th student
+            with open('files_log/feedback_details.txt', 'a', encoding='utf-8') as f:
+                f.write(f"Processed student: {student.student_id}\n")
+                f.write(f"Feedback details: {feedback_details}\n")
+                f.write("-" * 50 + "\n")
 
-        with open(f"Token_usage_log.txt", "a", encoding="utf-8") as f:
-            flock(f.fileno(), LOCK_EX)
-            f.write(json.dumps(token_metadata, ensure_ascii=False, default=str) + "\n")
-            flock(f.fileno(), LOCK_UN)
         return {"feedback": [feedback_info]}
     
     except ServerError as e:

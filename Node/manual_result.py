@@ -5,7 +5,7 @@ from Schemes.schema import OverallState
 
 def Manual_process_ocr_page(state: OverallState):
 
-    with open('files_log/final_ocr_results_M5.json', 'r') as f:
+    with open('files_log/final_ocr_results_M4.json', 'r') as f:
         ocr_results = json.load(f)
         
     return {"ocr_results": ocr_results}

@@ -10,6 +10,7 @@ from time import perf_counter
 from fcntl import flock, LOCK_EX, LOCK_UN
 from Schemes.schema import OverallState, PageState ,OCRExamResponse
 from config import get_gemini_model , get_ollama_model
+from utils.log_collecting import log_token_usage
 
 def llm_select(platform_name: str):
     
@@ -71,7 +72,7 @@ def process_ocr_page(state: PageState):
     Returns:
         dict: Contains ocr_results with the OCR processing output for the page
     """
-
+    start_date = datetime.now()
     strat_ocr_page = perf_counter()
 
     page_b64 = state["page_b64"]
@@ -120,18 +121,13 @@ def process_ocr_page(state: PageState):
 
     end_ocr_page = perf_counter()
 
-    token_meatadata = {str(datetime.now()): callback.usage_metadata,
-                        "processing_time": (end_ocr_page - strat_ocr_page),
-                        "agent_work": "OCR and Extract information each page",
-                        'platform': state["llm_OCR_platform"]
-                     }
-    try:
-        with open("Token_usage_log.txt", "a", encoding="utf-8") as log_file:
-            flock(log_file.fileno(), LOCK_EX)
-            log_file.write(json.dumps(token_meatadata, ensure_ascii=False, default=str) + "\n")
-            flock(log_file.fileno(), LOCK_UN)
-    except Exception as e:
-        print(f"Token log write error: {e}")
+    log_token_usage(callback, 
+                    start_date = start_date,
+                    processtime = (end_ocr_page - strat_ocr_page),
+                    platform = state["llm_OCR_platform"],
+                    agent_work = "OCR and Extract information each page"
+                    )
+
     
     ocr_results = items.get("ocr_results", [])
     
