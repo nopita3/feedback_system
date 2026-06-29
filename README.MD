@@ -1,6 +1,35 @@
-# Physics Exam OCR and AI Feedback Pipeline
+# Physics Exam OCR and AI Feedback Pipeline (Portfolio + Technical README)
 
-This project extracts and analyzes Thai physics exam documents with a LangGraph-based pipeline. It can split exam PDFs into pages, run OCR, classify question-level issues, generate student feedback with LLMs, and export results as JSON or PDF.
+This repository showcases an end-to-end AI pipeline I built for Thai physics exam analysis. It combines OCR, question-level classification, and LLM-based feedback generation to produce structured, student-specific insights and printable reports.
+
+For hiring teams, this project demonstrates practical skills in applied AI engineering: workflow orchestration (LangGraph), data modeling, prompt-driven analysis, and production-style output generation (JSON + PDF) with token-usage observability.
+
+## Portfolio Purpose (For Job Applications)
+
+### Problem I Solved
+Teachers and tutoring teams often spend significant time reviewing scanned exam papers, extracting question content, and writing actionable student feedback. This project automates that workflow from document ingestion to final report generation.
+
+### My Contribution
+- Designed and implemented a multi-stage AI pipeline for OCR + feedback generation.
+- Structured the system using graph-based execution modes (sequential/manual/parallel).
+- Built reusable data schemas for reliable state passing across pipeline stages.
+- Added reporting outputs and token analytics to support quality review and cost visibility.
+
+### Impact and Value
+- Reduces manual effort in turning raw exam files into student feedback artifacts.
+- Standardizes feedback output in machine-readable and human-readable formats.
+- Enables experimentation across model backends and execution strategies.
+
+### Skills Demonstrated
+- Python system design for AI workflows
+- OCR processing and document-to-structured-data conversion
+- LLM integration (Gemini, Ollama, OpenAI-compatible endpoints)
+- LangGraph orchestration and pipeline state management
+- Pydantic/TypedDict schema design
+- Reporting automation (HTML/PDF with Playwright + MathJax)
+- Token usage tracking and analysis dashboarding
+
+## Technical Overview
 
 ## What It Does
 
@@ -37,9 +66,9 @@ This project extracts and analyzes Thai physics exam documents with a LangGraph-
 - Python 3.10 or newer.
 - A virtual environment.
 - One or more model backends depending on your chosen run mode:
-	- Gemini API
-	- Ollama local models
-	- Typhoon / OpenAI-compatible endpoint
+  - Gemini API
+  - Ollama local models
+  - Typhoon / OpenAI-compatible endpoint
 
 Install dependencies with:
 
@@ -101,6 +130,14 @@ Model selection is configured in `config.py`.
 - The repository contains Thai-language prompts and labels because it targets Thai physics exam workflows.
 - Some paths in `app.py` are hardcoded for local experimentation and should be adjusted for your own dataset.
 - The project produces both analysis outputs and historical logs, which can be useful for benchmarking model quality.
+
+## Recruiter Quick Summary
+
+If you are evaluating this project for a role, key highlights are:
+- End-to-end ownership of an applied AI workflow.
+- Practical integration of OCR + LLM components.
+- Engineering focus on both output quality and operational visibility.
+- Real-world, domain-specific use case (education assessment feedback).
 
 ## License
 
